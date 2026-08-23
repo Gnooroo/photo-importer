@@ -30,9 +30,11 @@ class OneShotResult:
     catchup_sync_ok: bool
 
 
-def _try_sync(local_root: str, mount_point: str, remote_subpath: str, verbose: bool = True) -> bool:
+def _try_sync(
+    local_root: str, mount_point: str, remote_subpath: str, verbose: bool = True, label: str = "Sync"
+) -> bool:
     try:
-        nas_sync.sync(local_root, mount_point, remote_subpath, verbose=verbose)
+        nas_sync.sync(local_root, mount_point, remote_subpath, verbose=verbose, label=label)
         return True
     except nas_sync.NasSyncError as e:
         print(f"Warning: NAS sync failed: {e}")
@@ -95,7 +97,9 @@ def run_one_shot(
                 # own progress line -- avoid two live per-file streams
                 # fighting over the same terminal. The heartbeat thread below
                 # covers "is this still running" instead.
-                result["ok"] = _try_sync(local_root, nas_mount_point, nas_remote_subpath, verbose=False)
+                result["ok"] = _try_sync(
+                    local_root, nas_mount_point, nas_remote_subpath, verbose=False, label="Background NAS sync"
+                )
             finally:
                 done_event.set()
 
@@ -113,6 +117,8 @@ def run_one_shot(
         thread.join()
         background_sync_ok = result.get("ok", False)
         print(f"Background NAS sync: {'complete' if background_sync_ok else 'failed'}")
-        catchup_sync_ok = _try_sync(local_root, nas_mount_point, nas_remote_subpath)
+        catchup_sync_ok = _try_sync(
+            local_root, nas_mount_point, nas_remote_subpath, label="Catch-up NAS sync"
+        )
 
     return OneShotResult(summary, nas_available, background_sync_ok, catchup_sync_ok)

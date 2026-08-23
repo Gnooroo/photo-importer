@@ -16,6 +16,7 @@ from . import nas_sync, one_shot
 from .config import ConfigError, apply_cli_overrides, load_config, require_local_root
 from .importer import run_import
 from .source import SourceError, resolve_source
+from .timing import timed
 
 
 def _add_import_args(parser: argparse.ArgumentParser) -> None:
@@ -71,15 +72,17 @@ def _cmd_one_shot(args) -> int:
     local_root = require_local_root(config)
     source_dir = resolve_source(config.source, config.nas_mount_point)
 
-    result = one_shot.run_one_shot(
-        source_dir,
-        local_root,
-        config.extension_set,
-        config.nas_mount_point,
-        config.nas_remote_subpath,
-        config.nas_smb_url,
-        dry_run=args.dry_run,
-    )
+    label = "One-shot (dry-run)" if args.dry_run else "One-shot (total)"
+    with timed(label):
+        result = one_shot.run_one_shot(
+            source_dir,
+            local_root,
+            config.extension_set,
+            config.nas_mount_point,
+            config.nas_remote_subpath,
+            config.nas_smb_url,
+            dry_run=args.dry_run,
+        )
 
     verb = "Would import" if args.dry_run else "Imported"
     print(f"Scanned: {result.summary.scanned}")

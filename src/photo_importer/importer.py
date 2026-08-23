@@ -12,6 +12,7 @@ from pathlib import Path
 from . import metadata, scanner
 from .index import ImportIndex
 from .progress import Progress
+from .timing import timed
 
 
 @dataclass
@@ -97,76 +98,78 @@ def run_import(
     dry_run: bool = False,
 ) -> ImportSummary:
     summary = ImportSummary()
+    label = "Import (dry-run)" if dry_run else "Import"
 
-    if not dry_run and os.path.isdir(local_root):
-        removed = _cleanup_stale_temp_files(local_root)
-        if removed:
-            print(
-                f"Removed {removed} incomplete leftover file(s) from a previous "
-                "interrupted run (their content couldn't be verified, so they were "
-                "discarded rather than kept). If the source for those files (e.g. "
-                "the SD card) is still available, this run will re-copy them "
-                "correctly below; if not, that content may be lost."
-            )
+    with timed(label):
+        if not dry_run and os.path.isdir(local_root):
+            removed = _cleanup_stale_temp_files(local_root)
+            if removed:
+                print(
+                    f"Removed {removed} incomplete leftover file(s) from a previous "
+                    "interrupted run (their content couldn't be verified, so they were "
+                    "discarded rather than kept). If the source for those files (e.g. "
+                    "the SD card) is still available, this run will re-copy them "
+                    "correctly below; if not, that content may be lost."
+                )
 
-    index = ImportIndex(local_root)
+        index = ImportIndex(local_root)
 
-    files = scanner.scan(source_dir, extension_set)
-    summary.scanned = len(files)
-    if not files:
-        return summary
+        files = scanner.scan(source_dir, extension_set)
+        summary.scanned = len(files)
+        if not files:
+            return summary
 
-    dates = metadata.get_capture_dates(files)
+        dates = metadata.get_capture_dates(files)
 
-    total = len(files)
-    progress = Progress(total)
-    for i, src_path in enumerate(files, start=1):
-        size = src_path.stat().st_size
-        filename = src_path.name
+        total = len(files)
+        progress = Progress(total)
+        for i, src_path in enumerate(files, start=1):
+            size = src_path.stat().st_size
+            filename = src_path.name
 
-        if index.contains(filename, size):
-            summary.skipped_duplicate += 1
-        else:
-            capture_date = dates[src_path]
-            dest_dir = (
-                Path(local_root)
-                / capture_date.strftime("%Y")
-                / capture_date.strftime("%m")
-                / capture_date.strftime("%d")
-            )
-            dest_path = _unique_dest_path(dest_dir / filename, size)
-
-            # Same content already on disk but missing from the index (e.g.
-            # index file was deleted) -- treat as already imported rather
-            # than re-copying.
-            already_on_disk = dest_path.exists() and dest_path.stat().st_size == size
-
-            if not already_on_disk and not dry_run:
-                dest_dir.mkdir(parents=True, exist_ok=True)
-                # Copy to a hidden temp name, then atomically rename into
-                # place. A concurrent reader (e.g. a background NAS sync)
-                # must never observe a partially-written file at its real name.
-                tmp_path = dest_path.with_name(f".{dest_path.name}.tmp")
-                _safe_copy(src_path, tmp_path)
-                os.replace(tmp_path, dest_path)
-
-            index.record(filename, size, str(dest_path), capture_date.isoformat())
-
-            if already_on_disk:
+            if index.contains(filename, size):
                 summary.skipped_duplicate += 1
             else:
-                summary.imported += 1
-                summary.imported_files.append(str(dest_path))
+                capture_date = dates[src_path]
+                dest_dir = (
+                    Path(local_root)
+                    / capture_date.strftime("%Y")
+                    / capture_date.strftime("%m")
+                    / capture_date.strftime("%d")
+                )
+                dest_path = _unique_dest_path(dest_dir / filename, size)
 
-        verb = "Would import" if dry_run else "Importing"
-        progress.update(
-            f"{verb}: {i}/{total} ({i * 100 // total}%) "
-            f"imported={summary.imported} skipped={summary.skipped_duplicate}",
-            i,
-        )
-    progress.done()
+                # Same content already on disk but missing from the index (e.g.
+                # index file was deleted) -- treat as already imported rather
+                # than re-copying.
+                already_on_disk = dest_path.exists() and dest_path.stat().st_size == size
 
-    if not dry_run:
-        index.save()
+                if not already_on_disk and not dry_run:
+                    dest_dir.mkdir(parents=True, exist_ok=True)
+                    # Copy to a hidden temp name, then atomically rename into
+                    # place. A concurrent reader (e.g. a background NAS sync)
+                    # must never observe a partially-written file at its real name.
+                    tmp_path = dest_path.with_name(f".{dest_path.name}.tmp")
+                    _safe_copy(src_path, tmp_path)
+                    os.replace(tmp_path, dest_path)
 
-    return summary
+                index.record(filename, size, str(dest_path), capture_date.isoformat())
+
+                if already_on_disk:
+                    summary.skipped_duplicate += 1
+                else:
+                    summary.imported += 1
+                    summary.imported_files.append(str(dest_path))
+
+            verb = "Would import" if dry_run else "Importing"
+            progress.update(
+                f"{verb}: {i}/{total} ({i * 100 // total}%) "
+                f"imported={summary.imported} skipped={summary.skipped_duplicate}",
+                i,
+            )
+        progress.done()
+
+        if not dry_run:
+            index.save()
+
+        return summary

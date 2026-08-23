@@ -18,6 +18,8 @@ from __future__ import annotations
 
 import sys
 
+from .timing import now_time_str
+
 
 class Progress:
     def __init__(self, total: int, throttle_pct: int = 5, is_tty: bool | None = None):
@@ -29,6 +31,7 @@ class Progress:
     def update(self, message: str, done: int) -> None:
         if self.total <= 0:
             return
+        message = f"[{now_time_str()}] {message}"
         if self.is_tty:
             print(f"\r{message}", end="", flush=True)
             return

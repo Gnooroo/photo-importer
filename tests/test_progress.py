@@ -2,18 +2,21 @@ from unittest.mock import patch
 
 from photo_importer.progress import Progress
 
+FAKE_TIME = "12:00:00"
+
 
 def test_tty_mode_overwrites_in_place():
     progress = Progress(total=10, is_tty=True)
     printed = []
 
-    with patch("builtins.print", side_effect=lambda *a, **k: printed.append((a, k))):
+    with patch("builtins.print", side_effect=lambda *a, **k: printed.append((a, k))), \
+         patch("photo_importer.progress.now_time_str", return_value=FAKE_TIME):
         progress.update("step 1", 1)
         progress.update("step 2", 2)
         progress.done()
 
-    assert printed[0] == (("\rstep 1",), {"end": "", "flush": True})
-    assert printed[1] == (("\rstep 2",), {"end": "", "flush": True})
+    assert printed[0] == ((f"\r[{FAKE_TIME}] step 1",), {"end": "", "flush": True})
+    assert printed[1] == ((f"\r[{FAKE_TIME}] step 2",), {"end": "", "flush": True})
     assert printed[2] == ((), {})  # done() prints a bare newline on a tty
 
 
@@ -21,25 +24,27 @@ def test_non_tty_mode_prints_real_lines_throttled():
     progress = Progress(total=100, is_tty=False, throttle_pct=10)
     printed = []
 
-    with patch("builtins.print", side_effect=lambda *a, **k: printed.append(a[0])):
+    with patch("builtins.print", side_effect=lambda *a, **k: printed.append(a[0])), \
+         patch("photo_importer.progress.now_time_str", return_value=FAKE_TIME):
         for i in range(1, 101):
             progress.update(f"step {i}", i)
         progress.done()
 
     # ~10 lines (one per 10% bucket), not 100 -- and each is a real newline-terminated print
     assert 8 <= len(printed) <= 12
-    assert printed[-1] == "step 100"
+    assert printed[-1] == f"[{FAKE_TIME}] step 100"
 
 
 def test_non_tty_mode_always_reports_final_update():
     progress = Progress(total=7, is_tty=False, throttle_pct=50)
     printed = []
 
-    with patch("builtins.print", side_effect=lambda *a, **k: printed.append(a[0])):
+    with patch("builtins.print", side_effect=lambda *a, **k: printed.append(a[0])), \
+         patch("photo_importer.progress.now_time_str", return_value=FAKE_TIME):
         for i in range(1, 8):
             progress.update(f"step {i}", i)
 
-    assert printed[-1] == "step 7"
+    assert printed[-1] == f"[{FAKE_TIME}] step 7"
 
 
 def test_non_tty_done_does_not_print_extra_newline():
@@ -54,3 +59,14 @@ def test_zero_total_never_prints():
     with patch("builtins.print") as mock_print:
         progress.update("anything", 0)
     mock_print.assert_not_called()
+
+
+def test_message_includes_timestamp_prefix():
+    progress = Progress(total=1, is_tty=False)
+    printed = []
+
+    with patch("builtins.print", side_effect=lambda *a, **k: printed.append(a[0])):
+        progress.update("step 1", 1)
+
+    assert printed[0].startswith("[")
+    assert "] step 1" in printed[0]

@@ -17,6 +17,8 @@ import platform
 import subprocess
 import time
 
+from .timing import timed
+
 
 class NasSyncError(Exception):
     pass
@@ -47,7 +49,11 @@ def ensure_mounted(mount_point: str, smb_url: str | None, timeout: int = 10) -> 
 
 
 def sync(
-    local_root: str, mount_point: str, remote_subpath: str = "", verbose: bool = True
+    local_root: str,
+    mount_point: str,
+    remote_subpath: str = "",
+    verbose: bool = True,
+    label: str = "Sync",
 ) -> subprocess.CompletedProcess:
     if not mount_point:
         raise NasSyncError(
@@ -76,15 +82,16 @@ def sync(
         cmd.append("--progress" if platform.system() == "Darwin" else "--info=progress2")
     cmd += [src, dest]
 
-    # Only stderr is captured (for a clean error message on failure) -- stdout
-    # is left inherited so progress still streams live to the terminal.
-    try:
-        result = subprocess.run(cmd, stderr=subprocess.PIPE, text=True)
-    except FileNotFoundError as e:
-        raise NasSyncError(
-            "rsync is not installed or not on PATH. On Windows, this typically means "
-            "installing it via WSL or a port like cwrsync."
-        ) from e
-    if result.returncode != 0:
-        raise NasSyncError(f"rsync failed (exit {result.returncode}): {result.stderr.strip()}")
-    return result
+    with timed(label):
+        # Only stderr is captured (for a clean error message on failure) --
+        # stdout is left inherited so progress still streams live to the terminal.
+        try:
+            result = subprocess.run(cmd, stderr=subprocess.PIPE, text=True)
+        except FileNotFoundError as e:
+            raise NasSyncError(
+                "rsync is not installed or not on PATH. On Windows, this typically means "
+                "installing it via WSL or a port like cwrsync."
+            ) from e
+        if result.returncode != 0:
+            raise NasSyncError(f"rsync failed (exit {result.returncode}): {result.stderr.strip()}")
+        return result

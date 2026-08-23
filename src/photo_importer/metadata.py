@@ -11,6 +11,7 @@ from datetime import datetime
 from pathlib import Path
 
 from .progress import Progress
+from .timing import timed
 
 EXIFTOOL_DATE_FORMAT = "%Y:%m:%d %H:%M:%S"
 BATCH_SIZE = 200
@@ -54,12 +55,13 @@ def get_capture_dates(paths: list[Path]) -> dict[Path, datetime]:
         total = len(paths)
         progress = Progress(total)
         by_source_file: dict[str, dict] = {}
-        for i in range(0, total, BATCH_SIZE):
-            batch = paths[i:i + BATCH_SIZE]
-            by_source_file.update(_run_exiftool_batch(batch))
-            done = min(i + BATCH_SIZE, total)
-            progress.update(f"Reading metadata: {done}/{total} ({done * 100 // total}%)", done)
-        progress.done()
+        with timed("Reading metadata"):
+            for i in range(0, total, BATCH_SIZE):
+                batch = paths[i:i + BATCH_SIZE]
+                by_source_file.update(_run_exiftool_batch(batch))
+                done = min(i + BATCH_SIZE, total)
+                progress.update(f"Reading metadata: {done}/{total} ({done * 100 // total}%)", done)
+            progress.done()
 
         unresolved = []
         for path in paths:

@@ -137,6 +137,16 @@ backlog sync never looks like it's silently hung. The catch-up sync that
 runs after import finishes (when nothing else is printing) is verbose as
 usual.
 
+Every progress line is also prefixed with a `[HH:MM:SS]` timestamp, and each
+major operation prints its own `started at` / `ended at (took ...)` lines
+(`src/photo_importer/timing.py`) -- metadata reading, import as a whole,
+each NAS sync (labeled `Sync`, `Background NAS sync`, or `Catch-up NAS sync`
+depending on which one it is), and, in one-shot mode, the whole run
+(`One-shot (total)`, which is a genuinely different number from
+import-time + sync-time since they overlap). This is meant to make it easy
+to go back through a log afterward and see exactly how long each part of a
+run took, not just watch it live.
+
 ## One-shot mode
 
 Running `photo-importer` with no subcommand starts a background sync of the
