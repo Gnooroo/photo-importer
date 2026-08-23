@@ -12,7 +12,7 @@ def _fake_run(cmd, capture_output, text, check):
         stdout = ""
         stderr = ""
 
-    paths = cmd[4:]
+    paths = cmd[5:]
     entries = []
     for p in paths:
         if "with_exif" in p:

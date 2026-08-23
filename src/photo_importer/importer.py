@@ -135,12 +135,17 @@ def run_import(
         if not files:
             return summary
 
-        dates = metadata.get_capture_dates(files)
+        # Capture date is only needed for files that aren't already-imported
+        # duplicates (dedup is by filename+size alone) -- skip the exiftool
+        # pass entirely for anything index.contains() already rules out.
+        sizes = {f: f.stat().st_size for f in files}
+        pending_files = [f for f in files if not index.contains(f.name, sizes[f])]
+        dates = metadata.get_capture_dates(pending_files)
 
         total = len(files)
         progress = Progress(total)
         for i, src_path in enumerate(files, start=1):
-            size = src_path.stat().st_size
+            size = sizes[src_path]
             filename = src_path.name
 
             if index.contains(filename, size):
