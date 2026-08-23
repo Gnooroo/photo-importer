@@ -13,10 +13,32 @@ from __future__ import annotations
 
 import os
 import subprocess
+import time
 
 
 class NasSyncError(Exception):
     pass
+
+
+def ensure_mounted(mount_point: str, smb_url: str | None, timeout: int = 10) -> bool:
+    """Return True if mount_point is (or becomes) mounted. If not already
+    mounted and an smb_url is configured, ask Finder to connect it (`open
+    smb://...` -- uses Keychain-saved credentials if present, otherwise Finder
+    prompts on its own; this tool never handles credentials directly) and poll
+    briefly for the mount to appear.
+    """
+    if os.path.ismount(mount_point):
+        return True
+    if not smb_url:
+        return False
+
+    subprocess.run(["open", smb_url], check=False)
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if os.path.ismount(mount_point):
+            return True
+        time.sleep(1)
+    return os.path.ismount(mount_point)
 
 
 def sync(local_root: str, mount_point: str, remote_subpath: str = "") -> subprocess.CompletedProcess:
@@ -34,8 +56,12 @@ def sync(local_root: str, mount_point: str, remote_subpath: str = "") -> subproc
     os.makedirs(dest, exist_ok=True)
 
     src = local_root.rstrip("/") + "/"
-    cmd = [
-        "rsync", "-a", "--ignore-existing", "--inplace", "--info=progress2",
-        src, dest,
-    ]
-    return subprocess.run(cmd, check=True)
+    # -v rather than --info=progress2: macOS ships openrsync (protocol-29-era),
+    # which doesn't understand the newer --info= option.
+    cmd = ["rsync", "-av", "--ignore-existing", "--inplace", "--exclude=.*", src, dest]
+    # Only stderr is captured (for a clean error message on failure) -- stdout
+    # is left inherited so -v progress still streams live to the terminal.
+    result = subprocess.run(cmd, stderr=subprocess.PIPE, text=True)
+    if result.returncode != 0:
+        raise NasSyncError(f"rsync failed (exit {result.returncode}): {result.stderr.strip()}")
+    return result

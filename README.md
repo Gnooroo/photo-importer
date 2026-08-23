@@ -2,8 +2,8 @@
 
 A small CLI for importing photos/videos off an SD card (or any source folder)
 into a local library organized by capture date (`YYYY/MM/DD`), skipping files
-that have already been imported, plus a separate command to `rsync` the local
-library to a NAS SMB share.
+that have already been imported, and syncing that library to a NAS SMB share
+via `rsync`.
 
 ## Setup
 
@@ -24,30 +24,36 @@ cp config.example.yaml config.yaml
 
 ## Usage
 
-Import from an auto-detected mounted volume (e.g. an inserted SD card):
+**Default (one-shot) mode** -- run with no subcommand. Imports from the
+configured/auto-detected source while overlapping a background sync of
+whatever's already in the local library, then does one more sync pass at the
+end to push what this run just imported. See "One-shot mode" below.
+
+```
+photo-importer
+photo-importer --dry-run     # preview only, never touches the NAS
+```
+
+**`import`** -- local-only, never touches the NAS:
 
 ```
 photo-importer import
-```
-
-Import from an explicit path, or preview without copying:
-
-```
 photo-importer import --source /Volumes/SDCARD
 photo-importer import --dry-run
 ```
 
-Sync the local library to your NAS (the SMB share must already be mounted --
-via Finder's "Connect to Server", or `mount_smbfs`):
+**`sync`** -- push the local library to the NAS on its own (the SMB share
+must already be mounted -- via Finder's "Connect to Server", or
+`mount_smbfs`; unlike one-shot mode, this does not try to auto-mount):
 
 ```
 photo-importer sync
 ```
 
-Both commands read `config.yaml` from the current directory (or
+All three read `config.yaml` from the current directory (or
 `~/.config/photo-importer/config.yaml`); pass `--config path/to/file.yaml` to
-use a different one. `--source` and `--local-root` on `import`, and
-`--local-root` on `sync`, override the config file.
+use a different one. `--source` and `--local-root` (one-shot and `import`),
+and `--local-root` (`sync`), override the config file.
 
 ## How dedup works
 
@@ -58,16 +64,35 @@ incrementally from a card without worrying about double-copying.
 
 ## Local library vs. NAS: NAS is the archive
 
-`sync` is a one-way, additive push
-(`rsync -a --ignore-existing --inplace --info=progress2`, no `--delete`): it
-never removes or overwrites anything on the NAS, it only copies files that
-aren't there yet. This is intentional -- the NAS is meant to hold everything
-ever imported, while the local library is disposable and can be pruned to
-save space once its contents are confirmed synced. A file already present on
-the NAS at the same relative path is treated as a duplicate and skipped,
-regardless of whether the local copy is still around.
+Sync is a one-way, additive push (`rsync -av --ignore-existing --inplace`, no
+`--delete`): it never removes or overwrites anything on the NAS, it only
+copies files that aren't there yet. This is intentional -- the NAS is meant
+to hold everything ever imported, while the local library is disposable and
+can be pruned to save space once its contents are confirmed synced. A file
+already present on the NAS at the same relative path is treated as a
+duplicate and skipped, regardless of whether the local copy is still around.
 
 If sync feels slow, it's almost always the network, not rsync: a Wi-Fi link
 to the NAS is the usual bottleneck for large photo/video libraries, and a
 wired Ethernet connection (or an NAS-side rsync/SSH service instead of an SMB
 mount, if available) will generally be much faster.
+
+## One-shot mode
+
+Running `photo-importer` with no subcommand starts a background sync of the
+local library's current contents *before* copying anything from the source,
+so that backlog transfer overlaps with reading/copying off the card. Once
+import finishes, a final synchronous sync pass catches whatever this run just
+added. This is safe because sync is additive/idempotent (above) and because
+new files are written to a hidden temp name and atomically renamed into place
+-- a concurrent sync can never observe (and thus permanently skip, via
+`--ignore-existing`) a partially-written file.
+
+If `nas.mount_point` isn't already mounted, one-shot mode tries to mount it
+automatically via `open <nas.smb_url>` (uses a Keychain-saved login if you
+have one, or pops Finder's own login dialog -- this tool never handles
+credentials itself), waiting up to 10s. If it still isn't mounted, you'll see
+a warning and a prompt to press Enter before the run continues as an
+import-only pass (NAS sync skipped for that run). Set `nas.smb_url` in
+`config.yaml` to enable the auto-mount attempt; leave it unset to skip
+straight to the warning/prompt when unmounted.

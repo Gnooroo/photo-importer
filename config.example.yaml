@@ -35,3 +35,10 @@ nas:
   # Subfolder under the mount point to sync into (leave blank to sync to the
   # share's root).
   remote_subpath: Photos
+
+  # Share-level smb:// URL (no subfolder), used only by the default one-shot
+  # mode (`photo-importer` with no subcommand) to try auto-mounting the share
+  # if it isn't already mounted -- via `open smb://...`, which uses a
+  # Keychain-saved login if you have one, or pops Finder's own login dialog.
+  # Optional: leave unset to skip auto-mount and just warn if not mounted.
+  smb_url: smb://your-nas-hostname/NAS_SHARE

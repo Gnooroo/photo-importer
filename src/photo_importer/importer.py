@@ -4,6 +4,7 @@ the local index, and copy new files into local_root/YYYY/MM/DD/.
 
 from __future__ import annotations
 
+import os
 import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -75,7 +76,12 @@ def run_import(
 
         if not already_on_disk and not dry_run:
             dest_dir.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(src_path, dest_path)
+            # Copy to a hidden temp name, then atomically rename into place. A
+            # concurrent reader (e.g. a background NAS sync) must never observe
+            # a partially-written file at its real name.
+            tmp_path = dest_path.with_name(f".{dest_path.name}.tmp")
+            shutil.copy2(src_path, tmp_path)
+            os.replace(tmp_path, dest_path)
 
         index.record(filename, size, str(dest_path), capture_date.isoformat())
 

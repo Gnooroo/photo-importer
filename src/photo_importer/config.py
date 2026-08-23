@@ -31,6 +31,7 @@ class Config:
     extensions: list[str] = field(default_factory=lambda: list(DEFAULT_EXTENSIONS))
     nas_mount_point: str | None = None
     nas_remote_subpath: str = ""
+    nas_smb_url: str | None = None
 
     @property
     def extension_set(self) -> set[str]:
@@ -64,6 +65,7 @@ def load_config(explicit_path: str | None = None) -> Config:
         extensions=data.get("extensions", list(DEFAULT_EXTENSIONS)),
         nas_mount_point=nas.get("mount_point"),
         nas_remote_subpath=nas.get("remote_subpath", ""),
+        nas_smb_url=nas.get("smb_url"),
     )
 
 
