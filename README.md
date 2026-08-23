@@ -79,6 +79,16 @@ All three read `config.yaml` from the current directory (or
 use a different one. `--source` and `--local-root` (one-shot and `import`),
 and `--local-root` (`sync`), override the config file.
 
+Summary output uses `New` / `Already imported (skipped)` rather than
+"Imported" for the already-there count -- on a re-run where everything is
+already present, this reads as "0 new, 983 already imported" instead of the
+easily-misread "Imported: 0" (which looks like nothing worked, when really
+nothing *needed* to). `sync` and one-shot (when the NAS is available) also
+report `Synced to NAS: X/Y files` -- a live comparison of what's actually on
+the NAS right now against the local library, independent of whether the sync
+that just ran succeeded, so it's always a trustworthy answer to "how caught
+up is the archive," not just "did the last command exit 0."
+
 ## How dedup works
 
 Each import records `filename:size -> destination path` in

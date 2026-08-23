@@ -52,10 +52,10 @@ def _cmd_import(args) -> int:
 
     summary = run_import(source_dir, local_root, config.extension_set, dry_run=args.dry_run)
 
-    verb = "Would import" if args.dry_run else "Imported"
+    verb = "Would be new" if args.dry_run else "New"
     print(f"Scanned: {summary.scanned}")
     print(f"{verb}: {summary.imported}")
-    print(f"Skipped (already imported): {summary.skipped_duplicate}")
+    print(f"Already imported (skipped): {summary.skipped_duplicate}")
     return 0
 
 
@@ -63,6 +63,8 @@ def _cmd_sync(args) -> int:
     config = apply_cli_overrides(load_config(args.config), args)
     local_root = require_local_root(config)
     nas_sync.sync(local_root, config.nas_mount_point, config.nas_remote_subpath)
+    synced, total = nas_sync.count_synced(local_root, config.nas_mount_point, config.nas_remote_subpath)
+    print(f"Synced to NAS: {synced}/{total} files")
     print("Sync complete.")
     return 0
 
@@ -84,13 +86,15 @@ def _cmd_one_shot(args) -> int:
             dry_run=args.dry_run,
         )
 
-    verb = "Would import" if args.dry_run else "Imported"
+    verb = "Would be new" if args.dry_run else "New"
     print(f"Scanned: {result.summary.scanned}")
     print(f"{verb}: {result.summary.imported}")
-    print(f"Skipped (already imported): {result.summary.skipped_duplicate}")
+    print(f"Already imported (skipped): {result.summary.skipped_duplicate}")
     if not args.dry_run:
         if result.nas_available:
             print(f"NAS sync: {'ok' if result.catchup_sync_ok else 'failed'}")
+            synced, total = nas_sync.count_synced(local_root, config.nas_mount_point, config.nas_remote_subpath)
+            print(f"Synced to NAS: {synced}/{total} files")
         else:
             print("NAS sync: skipped (NAS not available)")
     return 0

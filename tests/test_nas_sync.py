@@ -172,3 +172,71 @@ def test_ensure_mounted_times_out(tmp_path):
          patch("time.sleep"), \
          patch("time.monotonic", side_effect=[0, 1, 2, 100]):
         assert nas_sync.ensure_mounted(str(tmp_path), "smb://host/share", timeout=10) is False
+
+
+def test_count_synced_all_present(tmp_path):
+    local_root = tmp_path / "library"
+    nas_root = tmp_path / "nas"
+    for rel in ["2024/01/01/a.jpg", "2024/01/02/b.jpg"]:
+        p = local_root / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(b"same content")
+        dp = nas_root / rel
+        dp.parent.mkdir(parents=True, exist_ok=True)
+        dp.write_bytes(b"same content")
+
+    synced, total = nas_sync.count_synced(str(local_root), str(nas_root))
+
+    assert (synced, total) == (2, 2)
+
+
+def test_count_synced_partial(tmp_path):
+    local_root = tmp_path / "library"
+    nas_root = tmp_path / "nas"
+    (local_root / "2024/01/01").mkdir(parents=True)
+    (local_root / "2024/01/01/a.jpg").write_bytes(b"content-a")
+    (local_root / "2024/01/01/b.jpg").write_bytes(b"content-b")
+    (nas_root / "2024/01/01").mkdir(parents=True)
+    (nas_root / "2024/01/01/a.jpg").write_bytes(b"content-a")
+    # b.jpg deliberately not present on the NAS side
+
+    synced, total = nas_sync.count_synced(str(local_root), str(nas_root))
+
+    assert (synced, total) == (1, 2)
+
+
+def test_count_synced_size_mismatch_not_counted(tmp_path):
+    local_root = tmp_path / "library"
+    nas_root = tmp_path / "nas"
+    (local_root / "2024/01/01").mkdir(parents=True)
+    (local_root / "2024/01/01/a.jpg").write_bytes(b"full content here")
+    (nas_root / "2024/01/01").mkdir(parents=True)
+    (nas_root / "2024/01/01/a.jpg").write_bytes(b"short")  # different size
+
+    synced, total = nas_sync.count_synced(str(local_root), str(nas_root))
+
+    assert (synced, total) == (0, 1)
+
+
+def test_count_synced_ignores_hidden_files(tmp_path):
+    local_root = tmp_path / "library"
+    (local_root).mkdir(parents=True)
+    (local_root / ".photo_importer_index.json").write_bytes(b"{}")
+
+    synced, total = nas_sync.count_synced(str(local_root), str(tmp_path / "nas"))
+
+    assert (synced, total) == (0, 0)
+
+
+def test_count_synced_with_remote_subpath(tmp_path):
+    local_root = tmp_path / "library"
+    mount_point = tmp_path / "nas_mount"
+    (local_root / "2024/01/01").mkdir(parents=True)
+    (local_root / "2024/01/01/a.jpg").write_bytes(b"content")
+    dest = mount_point / "Shared_Photos" / "2024/01/01"
+    dest.mkdir(parents=True)
+    (dest / "a.jpg").write_bytes(b"content")
+
+    synced, total = nas_sync.count_synced(str(local_root), str(mount_point), remote_subpath="Shared_Photos")
+
+    assert (synced, total) == (1, 1)

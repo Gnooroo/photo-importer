@@ -16,12 +16,35 @@ import os
 import platform
 import subprocess
 import time
+from pathlib import Path
 
 from .timing import timed
 
 
 class NasSyncError(Exception):
     pass
+
+
+def count_synced(local_root: str, mount_point: str, remote_subpath: str = "") -> tuple[int, int]:
+    """Return (synced, total): the total number of files currently in
+    local_root, and how many of them are also present at the NAS destination
+    with a matching size (same filename:size check used elsewhere for
+    dedup). This checks real, current on-disk state directly -- it doesn't
+    rely on any sync command having just run or reported success -- so it's
+    a trustworthy answer to "how much of my local library is actually on
+    the NAS right now" independent of anything else.
+    """
+    dest_root = Path(mount_point) / remote_subpath if remote_subpath else Path(mount_point)
+    total = 0
+    synced = 0
+    for path in Path(local_root).rglob("*"):
+        if not path.is_file() or path.name.startswith("."):
+            continue
+        total += 1
+        dest_path = dest_root / path.relative_to(local_root)
+        if dest_path.exists() and dest_path.stat().st_size == path.stat().st_size:
+            synced += 1
+    return synced, total
 
 
 def ensure_mounted(mount_point: str, smb_url: str | None, timeout: int = 10) -> bool:
