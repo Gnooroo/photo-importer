@@ -55,3 +55,13 @@ Each import records `filename:size -> destination path` in
 `<local_root>/.photo_importer_index.json`. Re-running against the same or an
 overlapping source skips anything already in the index, so you can import
 incrementally from a card without worrying about double-copying.
+
+## Local library vs. NAS: NAS is the archive
+
+`sync` is a one-way, additive push (`rsync -av --ignore-existing`, no
+`--delete`): it never removes or overwrites anything on the NAS, it only
+copies files that aren't there yet. This is intentional -- the NAS is meant
+to hold everything ever imported, while the local library is disposable and
+can be pruned to save space once its contents are confirmed synced. A file
+already present on the NAS at the same relative path is treated as a
+duplicate and skipped, regardless of whether the local copy is still around.
