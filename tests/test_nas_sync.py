@@ -43,8 +43,35 @@ def test_sync_command_is_additive_never_deletes(tmp_path):
     assert "--delete-before" not in cmd
     assert "--ignore-existing" in cmd
     assert "--exclude=.*" in cmd
+    assert "--progress" in cmd
     assert cmd[-1] == str(mount_point / "Shared_Photos")
     assert cmd[-2] == str(local_root) + "/"
+
+
+def test_sync_verbose_false_omits_progress_flags(tmp_path):
+    mount_point = tmp_path / "nas"
+    mount_point.mkdir()
+    local_root = tmp_path / "library"
+    local_root.mkdir()
+
+    captured_cmd = {}
+
+    def fake_run(cmd, stderr=None, text=None):
+        captured_cmd["cmd"] = cmd
+
+        class Result:
+            returncode = 0
+            stderr = ""
+
+        return Result()
+
+    with patch("os.path.ismount", return_value=True), patch("subprocess.run", side_effect=fake_run):
+        nas_sync.sync(str(local_root), str(mount_point), verbose=False)
+
+    cmd = captured_cmd["cmd"]
+    assert "-v" not in cmd
+    assert "--progress" not in cmd
+    assert "--ignore-existing" in cmd  # safety flags stay regardless of verbosity
 
 
 def test_sync_wraps_rsync_failure_as_nas_sync_error(tmp_path):

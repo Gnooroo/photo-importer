@@ -77,6 +77,17 @@ to the NAS is the usual bottleneck for large photo/video libraries, and a
 wired Ethernet connection (or an NAS-side rsync/SSH service instead of an SMB
 mount, if available) will generally be much faster.
 
+## Progress reporting
+
+Both metadata reading and the copy step print a live-updating single line
+(e.g. `Importing: 342/1528 (22%) imported=340 skipped=2`) so a large card
+doesn't sit silent for minutes. `sync` streams rsync's own per-file
+`-v --progress` output. In one-shot mode, the background sync (running
+concurrently with the import loop) is quiet -- just a "starting" line and any
+failure warning -- so its per-file output doesn't fight with the import
+progress line on the same terminal; the catch-up sync that runs after import
+finishes (when nothing else is printing) is verbose as usual.
+
 ## One-shot mode
 
 Running `photo-importer` with no subcommand starts a background sync of the

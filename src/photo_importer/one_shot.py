@@ -27,9 +27,9 @@ class OneShotResult:
     catchup_sync_ok: bool
 
 
-def _try_sync(local_root: str, mount_point: str, remote_subpath: str) -> bool:
+def _try_sync(local_root: str, mount_point: str, remote_subpath: str, verbose: bool = True) -> bool:
     try:
-        nas_sync.sync(local_root, mount_point, remote_subpath)
+        nas_sync.sync(local_root, mount_point, remote_subpath, verbose=verbose)
         return True
     except nas_sync.NasSyncError as e:
         print(f"Warning: NAS sync failed: {e}")
@@ -69,9 +69,13 @@ def run_one_shot(
     thread = None
     if nas_available:
         result = {}
+        print("Starting background NAS sync of existing library...")
 
         def _background():
-            result["ok"] = _try_sync(local_root, nas_mount_point, nas_remote_subpath)
+            # verbose=False: this runs concurrently with the import loop's own
+            # progress line -- avoid two live per-file streams fighting over
+            # the same terminal.
+            result["ok"] = _try_sync(local_root, nas_mount_point, nas_remote_subpath, verbose=False)
 
         thread = threading.Thread(target=_background, daemon=True)
         thread.start()

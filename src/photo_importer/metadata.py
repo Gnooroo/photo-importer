@@ -49,10 +49,14 @@ def get_capture_dates(paths: list[Path]) -> dict[Path, datetime]:
     unresolved = list(paths)
 
     if exiftool_available() and paths:
+        total = len(paths)
         by_source_file: dict[str, dict] = {}
-        for i in range(0, len(paths), BATCH_SIZE):
+        for i in range(0, total, BATCH_SIZE):
             batch = paths[i:i + BATCH_SIZE]
             by_source_file.update(_run_exiftool_batch(batch))
+            done = min(i + BATCH_SIZE, total)
+            print(f"\rReading metadata: {done}/{total} ({done * 100 // total}%)", end="", flush=True)
+        print()
 
         unresolved = []
         for path in paths:
