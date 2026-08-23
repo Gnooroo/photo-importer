@@ -35,6 +35,20 @@ def _default_config_locations() -> list[Path]:
     return locations
 
 
+def app_state_dir() -> Path:
+    """Per-user directory for photo-importer's own bookkeeping files (e.g.
+    nas_sync's sync-state cache) -- same Windows/APPDATA vs. ~/.config split
+    as config.yaml's search locations above, so app-owned state lives next
+    to config.yaml rather than inside the photo library itself (which is
+    meant to hold only the library's own files and gets rsynced to the NAS
+    verbatim).
+    """
+    appdata = os.environ.get("APPDATA")
+    if appdata:
+        return Path(appdata) / "photo-importer"
+    return Path.home() / ".config" / "photo-importer"
+
+
 class ConfigError(Exception):
     pass
 

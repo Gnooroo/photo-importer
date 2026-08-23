@@ -7,9 +7,11 @@ Safe to overlap with an in-progress import because:
 - nas_sync.sync() is additive/idempotent (--ignore-existing, no --delete), so
   running it concurrently with new files landing in local_root never risks
   clobbering or losing anything.
-- importer.run_import() writes new files via a temp-name-then-rename, and
-  nas_sync.sync() excludes dotfiles (--exclude=.*), so a concurrent sync pass
-  can never observe or transfer a partially-written file.
+- importer.run_import() writes new files via a temp-name-then-rename
+  (".{name}.tmp"), and nas_sync.sync() always excludes that pattern (see
+  nas_sync._is_sync_excluded), so a concurrent sync pass can never observe
+  or transfer a partially-written file. Genuinely hidden photos/videos are
+  not excluded and sync like any other file.
 
 Import (main thread) and the background sync (a separate thread) each get
 their own output region (see output.py) so their progress lines stay
@@ -64,7 +66,7 @@ def _background_sync_loop(
             local_root, mount_point, remote_subpath, label=f"Background NAS sync (pass {pass_num})", workers=workers
         )
         ok = ok and pass_ok
-        synced, total = nas_sync.count_synced(local_root, mount_point, remote_subpath)
+        synced, total = nas_sync.count_synced(local_root, mount_point, remote_subpath, use_cache=True)
         report(f"Background NAS sync: pass {pass_num} complete ({synced}/{total} files on NAS so far)")
         import_done.wait(timeout=interval)
 
@@ -73,7 +75,7 @@ def _background_sync_loop(
         local_root, mount_point, remote_subpath, label="Background NAS sync (final pass)", workers=workers
     )
     ok = ok and pass_ok
-    synced, total = nas_sync.count_synced(local_root, mount_point, remote_subpath)
+    synced, total = nas_sync.count_synced(local_root, mount_point, remote_subpath, use_cache=True)
     report(f"Background NAS sync: final pass complete ({synced}/{total} files on NAS)")
     result["ok"] = ok
 

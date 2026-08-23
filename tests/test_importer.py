@@ -7,6 +7,7 @@ from unittest.mock import patch
 import pytest
 
 from photo_importer.importer import _cleanup_stale_temp_files, resolve_dest_path, run_import
+from photo_importer.index import ImportIndex
 
 
 def _mock_dates(paths, when, workers=None):
@@ -68,7 +69,7 @@ def test_dry_run_does_not_copy_or_persist_index(tmp_path):
 
     assert summary.imported == 1
     assert not (local_root / "2024" / "03" / "15" / "IMG_0001.jpg").exists()
-    assert not (local_root / ".photo_importer_index.json").exists()
+    assert not ImportIndex(str(local_root)).contains("IMG_0001.jpg", 3)
 
 
 def test_same_name_different_content_gets_suffixed(tmp_path):

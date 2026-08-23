@@ -6,27 +6,43 @@ re-walk the whole destination tree.
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
 
-INDEX_FILENAME = ".photo_importer_index.json"
+from .config import app_state_dir
+
+INDEX_FILENAME = "import_index.json"
 
 
 class ImportIndex:
-    def __init__(self, local_root: str):
-        self.path = Path(local_root) / INDEX_FILENAME
-        self._entries: dict[str, dict] = {}
-        self._load()
+    """Stored under app_state_dir() (next to config.yaml), not inside
+    local_root -- the library is meant to hold only real archive content,
+    since (unlike before) it now gets rsynced to the NAS as-is including
+    hidden files (see nas_sync._is_sync_excluded). One shared file can hold
+    the index for multiple libraries, keyed by each local_root's resolved
+    absolute path; saving re-reads and merges rather than overwriting so
+    concurrent libraries don't clobber each other's index.
+    """
 
-    def _load(self) -> None:
-        if self.path.is_file():
+    def __init__(self, local_root: str):
+        self.path = app_state_dir() / INDEX_FILENAME
+        self._root_key = str(Path(local_root).expanduser().resolve())
+        self._entries: dict[str, dict] = self._load_all().get(self._root_key, {})
+
+    def _load_all(self) -> dict:
+        if not self.path.is_file():
+            return {}
+        try:
             with open(self.path) as f:
-                self._entries = json.load(f)
+                return json.load(f)
+        except (json.JSONDecodeError, OSError):
+            return {}
 
     def save(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        data = self._load_all()
+        data[self._root_key] = self._entries
         with open(self.path, "w") as f:
-            json.dump(self._entries, f, indent=2, sort_keys=True)
+            json.dump(data, f, indent=2, sort_keys=True)
 
     @staticmethod
     def _key(filename: str, size: int) -> str:

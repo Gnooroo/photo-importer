@@ -114,7 +114,9 @@ def _cmd_sync(args) -> int:
         local_root, config.nas_mount_point, config.nas_remote_subpath, label="Sync", workers=workers
     )
 
-    synced, total = nas_sync.count_synced(local_root, config.nas_mount_point, config.nas_remote_subpath)
+    synced, total = nas_sync.count_synced(
+        local_root, config.nas_mount_point, config.nas_remote_subpath, use_cache=True
+    )
     print(f"Synced to NAS: {synced}/{total} files")
     if not ok:
         print("Sync failed.", file=sys.stderr)
@@ -149,7 +151,9 @@ def _cmd_one_shot(args) -> int:
     if not args.dry_run:
         if result.nas_available:
             print(f"NAS sync: {'ok' if result.sync_ok else 'failed'}")
-            synced, total = nas_sync.count_synced(local_root, config.nas_mount_point, config.nas_remote_subpath)
+            synced, total = nas_sync.count_synced(
+                local_root, config.nas_mount_point, config.nas_remote_subpath, use_cache=True
+            )
             print(f"Synced to NAS: {synced}/{total} files")
         else:
             print("NAS sync: skipped (NAS not available)")

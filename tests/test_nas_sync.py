@@ -1,4 +1,5 @@
 import os
+import shutil
 import threading
 import time
 from unittest.mock import patch
@@ -92,7 +93,8 @@ def test_sync_command_is_additive_never_deletes_and_is_quiet(tmp_path):
     assert "--delete-after" not in cmd
     assert "--delete-before" not in cmd
     assert "--ignore-existing" in cmd
-    assert "--exclude=.*" in cmd
+    assert "--exclude=._*" in cmd
+    assert "--exclude=.*.tmp" in cmd
     # no rsync-level verbosity flags -- rsync's own -v prints a line per
     # already-synced file ("Skip existing '<path>'"), which is pure noise on
     # a large, mostly-synced library; progress instead comes from
@@ -104,6 +106,26 @@ def test_sync_command_is_additive_never_deletes_and_is_quiet(tmp_path):
     assert cmd[-1] == str(mount_point / "Shared_Photos")
     assert cmd[-2] == str(local_root) + "/"
     assert listed == ["2024/01/01/a.jpg"]
+
+
+def test_sync_transfers_genuinely_hidden_files(tmp_path):
+    """A real hidden photo/video is real archive content and must be
+    synced like any other file -- only junk (AppleDouble sidecars, our own
+    in-progress temp files) is excluded. See _is_sync_excluded.
+    """
+    mount_point = tmp_path / "nas"
+    mount_point.mkdir()
+    local_root = tmp_path / "library"
+    _make_pending_files(local_root, [("2024/01/01/.hidden_clip.mov", 100)])
+
+    calls = []
+    with patch("os.path.ismount", return_value=True), \
+         patch("subprocess.run", side_effect=_fake_run_factory(calls=calls)):
+        nas_sync.sync(str(local_root), str(mount_point))
+
+    assert len(calls) == 1
+    _cmd, listed = calls[0]
+    assert listed == ["2024/01/01/.hidden_clip.mov"]
 
 
 def test_sync_partitions_files_across_workers(tmp_path):
@@ -321,14 +343,44 @@ def test_count_synced_size_mismatch_not_counted(tmp_path):
     assert (synced, total) == (0, 1)
 
 
-def test_count_synced_ignores_hidden_files(tmp_path):
+def test_count_synced_ignores_apple_double_sidecars(tmp_path):
     local_root = tmp_path / "library"
     (local_root).mkdir(parents=True)
-    (local_root / ".photo_importer_index.json").write_bytes(b"{}")
+    (local_root / "._a.jpg").write_bytes(b"junk")
 
     synced, total = nas_sync.count_synced(str(local_root), str(tmp_path / "nas"))
 
     assert (synced, total) == (0, 0)
+
+
+def test_count_synced_ignores_in_progress_temp_files(tmp_path):
+    local_root = tmp_path / "library"
+    (local_root).mkdir(parents=True)
+    (local_root / ".a.jpg.tmp").write_bytes(b"partial")
+
+    synced, total = nas_sync.count_synced(str(local_root), str(tmp_path / "nas"))
+
+    assert (synced, total) == (0, 0)
+
+
+def test_count_synced_treats_genuinely_hidden_files_as_normal(tmp_path):
+    """Unlike AppleDouble sidecars and our own temp files, a real hidden
+    photo/video (scanner.py imports these like any other file -- see
+    a7c07b5) must be walked and synced like anything else.
+    """
+    local_root = tmp_path / "library"
+    nas_root = tmp_path / "nas"
+    (local_root).mkdir(parents=True)
+    (local_root / ".hidden_clip.mov").write_bytes(b"content")
+
+    synced, total = nas_sync.count_synced(str(local_root), str(nas_root))
+    assert (synced, total) == (0, 1)
+
+    (nas_root).mkdir(parents=True)
+    (nas_root / ".hidden_clip.mov").write_bytes(b"content")
+
+    synced, total = nas_sync.count_synced(str(local_root), str(nas_root))
+    assert (synced, total) == (1, 1)
 
 
 def test_count_synced_with_remote_subpath(tmp_path):
@@ -382,3 +434,154 @@ def test_sync_with_heartbeat_reports_periodic_progress(tmp_path):
 
     assert holder.get("ok") is True
     assert any("3/10 files on NAS" in str(c) for c in mock_report.call_args_list)
+
+
+def test_sync_writes_state_cache_file_outside_local_root(tmp_path):
+    mount_point = tmp_path / "nas"
+    mount_point.mkdir()
+    local_root = tmp_path / "library"
+    _make_pending_files(local_root, [("2024/01/01/a.jpg", 100)])
+
+    with patch("os.path.ismount", return_value=True), \
+         patch("subprocess.run", side_effect=_fake_run_factory()):
+        nas_sync.sync(str(local_root), str(mount_point))
+
+    cache_path = nas_sync.app_state_dir() / nas_sync.SYNC_STATE_FILENAME
+    assert cache_path.is_file()
+    # never inside the library -- it would otherwise need excluding from
+    # every rsync pass, and risk excluding a real hidden photo/video too
+    assert not (local_root / nas_sync.SYNC_STATE_FILENAME).exists()
+    assert not any(p.name == nas_sync.SYNC_STATE_FILENAME for p in local_root.rglob("*"))
+
+
+def test_sync_second_pass_trusts_cache_and_skips_rsync_entirely(tmp_path):
+    """Once a file has been verified present on the NAS, an unchanged
+    (same size, same mtime) second sync pass should never even need to
+    re-check it -- reproducing the case that motivated the cache: a
+    "nothing new" sync pass on a huge, already-synced archive shouldn't
+    have to re-walk and re-stat everything on both sides again.
+    """
+    mount_point = tmp_path / "nas"
+    mount_point.mkdir()
+    local_root = tmp_path / "library"
+    _make_pending_files(local_root, [("2024/01/01/a.jpg", 100)])
+
+    calls = []
+    with patch("os.path.ismount", return_value=True), \
+         patch("subprocess.run", side_effect=_fake_run_factory(calls=calls)):
+        nas_sync.sync(str(local_root), str(mount_point))
+        assert len(calls) == 1
+
+        nas_sync.sync(str(local_root), str(mount_point))
+        assert len(calls) == 1  # no new rsync invocation -- cache says it's already there
+
+
+def test_cache_rechecks_file_whose_mtime_changed(tmp_path):
+    mount_point = tmp_path / "nas"
+    mount_point.mkdir()
+    local_root = tmp_path / "library"
+    _make_pending_files(local_root, [("2024/01/01/a.jpg", 100)])
+
+    calls = []
+    with patch("os.path.ismount", return_value=True), \
+         patch("subprocess.run", side_effect=_fake_run_factory(calls=calls)):
+        nas_sync.sync(str(local_root), str(mount_point))
+        assert len(calls) == 1
+
+        # simulate the file being touched/re-written after being verified
+        target = local_root / "2024/01/01/a.jpg"
+        os.utime(target, (time.time() + 100, time.time() + 100))
+
+        nas_sync.sync(str(local_root), str(mount_point))
+        assert len(calls) == 2  # mtime changed -- re-verified, not trusted from cache
+
+
+def test_cache_ignored_when_destination_changes(tmp_path):
+    mount_point = tmp_path / "nas"
+    mount_point.mkdir()
+    local_root = tmp_path / "library"
+    _make_pending_files(local_root, [("2024/01/01/a.jpg", 100)])
+
+    calls = []
+    with patch("os.path.ismount", return_value=True), \
+         patch("subprocess.run", side_effect=_fake_run_factory(calls=calls)):
+        nas_sync.sync(str(local_root), str(mount_point), remote_subpath="A")
+        assert len(calls) == 1
+
+        # different destination -- cache recorded against "A" must not be
+        # trusted for "B", even though the local file is unchanged
+        nas_sync.sync(str(local_root), str(mount_point), remote_subpath="B")
+        assert len(calls) == 2
+
+
+def test_cache_shared_file_keeps_separate_libraries_independent(tmp_path):
+    """The cache file lives in one shared per-user location, keyed
+    internally by each library's resolved path -- saving state for one
+    library must not clobber another library's already-recorded state.
+    """
+    mount_point = tmp_path / "nas"
+    mount_point.mkdir()
+    library_a = tmp_path / "library_a"
+    library_b = tmp_path / "library_b"
+    _make_pending_files(library_a, [("2024/01/01/a.jpg", 100)])
+    _make_pending_files(library_b, [("2024/01/01/b.jpg", 100)])
+
+    calls = []
+    with patch("os.path.ismount", return_value=True), \
+         patch("subprocess.run", side_effect=_fake_run_factory(calls=calls)):
+        nas_sync.sync(str(library_a), str(mount_point))
+        nas_sync.sync(str(library_b), str(mount_point))
+        assert len(calls) == 2
+
+        # both libraries' verified state should now be trusted from cache,
+        # with neither library's save() having wiped the other's entry
+        nas_sync.sync(str(library_a), str(mount_point))
+        nas_sync.sync(str(library_b), str(mount_point))
+        assert len(calls) == 2  # no new rsync invocations for either
+
+
+def test_diff_uses_cache_even_if_nas_side_becomes_unreachable(tmp_path):
+    """A file the cache has verified is trusted without touching the NAS
+    side at all -- demonstrated here by deleting the NAS-side tree entirely
+    after verification and confirming the diff still reports it synced.
+    """
+    local_root = tmp_path / "library"
+    nas_root = tmp_path / "nas"
+    (local_root / "2024/01/01").mkdir(parents=True)
+    (local_root / "2024/01/01/a.jpg").write_bytes(b"content")
+    (nas_root / "2024/01/01").mkdir(parents=True)
+    (nas_root / "2024/01/01/a.jpg").write_bytes(b"content")
+
+    cache = nas_sync._SyncStateCache(str(local_root), str(nas_root))
+    total, pending = nas_sync._diff_local_vs_nas(str(local_root), str(nas_root), cache=cache)
+    assert (total, pending) == (1, [])
+    cache.save()
+
+    shutil.rmtree(nas_root)
+
+    reloaded = nas_sync._SyncStateCache(str(local_root), str(nas_root))
+    total2, pending2 = nas_sync._diff_local_vs_nas(str(local_root), str(nas_root), cache=reloaded)
+    assert (total2, pending2) == (1, [])
+
+
+def test_count_synced_use_cache_true_persists_and_reads_cache(tmp_path):
+    local_root = tmp_path / "library"
+    nas_root = tmp_path / "nas"
+    (local_root / "2024/01/01").mkdir(parents=True)
+    (local_root / "2024/01/01/a.jpg").write_bytes(b"content")
+    (nas_root / "2024/01/01").mkdir(parents=True)
+    (nas_root / "2024/01/01/a.jpg").write_bytes(b"content")
+
+    synced, total = nas_sync.count_synced(str(local_root), str(nas_root), use_cache=True)
+    assert (synced, total) == (1, 1)
+    assert (nas_sync.app_state_dir() / nas_sync.SYNC_STATE_FILENAME).is_file()
+
+    shutil.rmtree(nas_root)
+
+    # cache from the previous call still says it's verified
+    synced2, total2 = nas_sync.count_synced(str(local_root), str(nas_root), use_cache=True)
+    assert (synced2, total2) == (1, 1)
+
+    # the default, uncached path always checks real state
+    synced3, total3 = nas_sync.count_synced(str(local_root), str(nas_root))
+    assert (synced3, total3) == (0, 1)
