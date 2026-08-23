@@ -36,6 +36,11 @@ def _add_workers_arg(parser: argparse.ArgumentParser) -> None:
 
 def _add_migrate_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--source", help="Source folder to consolidate from")
+    parser.add_argument(
+        "--dest",
+        help="Archive destination root (default: NAS mount + remote subpath from config). "
+        "Overriding this skips the NAS-mount check, so migrate can run standalone against any two folders.",
+    )
     parser.add_argument("--batch-size", type=int, help="Max files to process this run (default from config, or 200)")
     parser.add_argument("--config", help="Path to config.yaml")
     parser.add_argument("--dry-run", action="store_true", help="Show what would happen without changing anything")
@@ -62,7 +67,7 @@ def _build_parser() -> argparse.ArgumentParser:
     _add_workers_arg(sync_parser)
 
     migrate_parser = subparsers.add_parser(
-        "migrate", help="Consolidate an existing catalog into the archive (copy/purge steps)"
+        "migrate", help="Consolidate an existing catalog into the archive (copy/purge/move steps)"
     )
     migrate_subparsers = migrate_parser.add_subparsers(dest="migrate_command", required=True)
     migrate_subparsers.add_parser(
@@ -72,6 +77,14 @@ def _build_parser() -> argparse.ArgumentParser:
     migrate_subparsers.add_parser(
         "purge", parents=[migrate_args],
         help="Delete source files already confirmed present in the archive (no copying)",
+    )
+    migrate_subparsers.add_parser(
+        "move", parents=[migrate_args],
+        help=(
+            "Rename files straight into the archive instead of copy+purge (faster, since "
+            "source and archive are normally the same filesystem) -- only for folders you "
+            "know are NOT actively receiving new uploads, same as purge"
+        ),
     )
 
     parser.set_defaults(command="one-shot")
@@ -152,12 +165,15 @@ def _resolve_migrate_args(args) -> tuple:
             "Migrate source is not set. Pass --source or set migrate.source_path in your config.yaml."
         )
     batch_size = args.batch_size or config.migrate_batch_size
-    nas_sync.require_mounted(config.nas_mount_point)
-    dest_root = (
-        os.path.join(config.nas_mount_point, config.nas_remote_subpath)
-        if config.nas_remote_subpath
-        else config.nas_mount_point
-    )
+    if args.dest:
+        dest_root = os.path.expanduser(args.dest)
+    else:
+        nas_sync.require_mounted(config.nas_mount_point)
+        dest_root = (
+            os.path.join(config.nas_mount_point, config.nas_remote_subpath)
+            if config.nas_remote_subpath
+            else config.nas_mount_point
+        )
     return source_dir, dest_root, config.extension_set, batch_size
 
 
@@ -193,6 +209,24 @@ def _cmd_migrate_purge(args) -> int:
     return 0
 
 
+def _cmd_migrate_move(args) -> int:
+    source_dir, dest_root, extension_set, batch_size = _resolve_migrate_args(args)
+    summary = migrate.run_move(source_dir, dest_root, extension_set, batch_size, dry_run=args.dry_run)
+
+    verb = "Would move" if args.dry_run else "Moved"
+    print(f"Found in source: {summary.scanned_total}")
+    print(f"This batch: {summary.batch_size}")
+    print(f"{verb}: {summary.moved}")
+    print(f"Already in archive (deleted from source): {summary.already_present}")
+    if summary.failed:
+        print(f"Failed: {summary.failed}")
+        for path, reason in summary.failed_files:
+            print(f"  {path}: {reason}")
+    if summary.remaining > 0:
+        print(f"Remaining (re-run to continue): {summary.remaining}")
+    return 0
+
+
 def main(argv=None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
@@ -205,6 +239,8 @@ def main(argv=None) -> int:
         elif args.command == "migrate":
             if args.migrate_command == "copy":
                 return _cmd_migrate_copy(args)
+            elif args.migrate_command == "move":
+                return _cmd_migrate_move(args)
             else:
                 return _cmd_migrate_purge(args)
         else:

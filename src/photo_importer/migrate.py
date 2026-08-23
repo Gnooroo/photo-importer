@@ -10,9 +10,18 @@ two independent, explicitly-run steps:
   the archive. Meant to be run only against folders you know are no longer
   actively receiving new uploads -- the tool doesn't try to detect that,
   it's the caller's judgement call which folders to point this at.
+- move: same "confirmed-inactive folder" precondition as purge, but skips
+  the separate copy+purge dance. Source and dest_root are normally the same
+  filesystem (dest_root is always a subpath of the NAS mount), so a rename
+  is a metadata-only op -- no bytes need to move over SMB at all. Files
+  already present in the archive are just deleted from source (like purge);
+  pending files are moved straight into place. NOT a safe substitute for
+  copy against an actively-uploading folder: unlike copy, every file in a
+  move batch is gone from the source immediately, including ones just
+  moved in -- the same active-upload risk purge is scoped to avoid.
 
-Neither step is wired into one-shot/import/sync -- always an explicit,
-separate `photo-importer migrate copy|purge` invocation.
+None of the three steps are wired into one-shot/import/sync -- always an
+explicit, separate `photo-importer migrate copy|purge|move` invocation.
 
 Both steps need to know each file's already-archived status before picking
 a batch, not just take a blind prefix slice of the scan: copy never shrinks
@@ -28,6 +37,7 @@ by batch_size either way.
 
 from __future__ import annotations
 
+import errno
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -60,6 +70,17 @@ class PurgeSummary:
     batch_size: int = 0
     purged: int = 0
     remaining: int = 0  # archived-but-not-yet-purged files not covered by this batch
+
+
+@dataclass
+class MoveSummary:
+    scanned_total: int = 0
+    batch_size: int = 0
+    moved: int = 0  # pending files renamed into the archive
+    already_present: int = 0  # already-archived files just deleted from source
+    failed: int = 0
+    failed_files: list[tuple[str, str]] = field(default_factory=list)
+    remaining: int = 0  # files not covered by this batch -- re-run to continue
 
 
 def _check_no_overlap(source_dir: str, dest_root: str) -> None:
@@ -181,6 +202,77 @@ def run_purge(
 
             verb = "Would purge" if dry_run else "Purging"
             progress.update(f"{verb}: {i}/{total} ({i * 100 // total}%) purged={summary.purged}", i)
+        progress.done()
+
+    return summary
+
+
+def _move_file(src_path: Path, dest_path: Path) -> None:
+    """Rename src_path into dest_path -- atomic and metadata-only when both
+    are on the same filesystem (the normal case). Falls back to copy+delete
+    only if they turn out to be on different filesystems.
+    """
+    try:
+        os.replace(src_path, dest_path)
+    except OSError as e:
+        if e.errno != errno.EXDEV:
+            raise
+        tmp_path = dest_path.with_name(f".{dest_path.name}.tmp")
+        safe_copy(src_path, tmp_path)
+        os.replace(tmp_path, dest_path)
+        os.remove(src_path)
+
+
+def run_move(
+    source_dir: str,
+    dest_root: str,
+    extension_set: set[str],
+    batch_size: int,
+    dry_run: bool = False,
+) -> MoveSummary:
+    _check_no_overlap(source_dir, dest_root)
+    summary = MoveSummary()
+
+    archived, pending = _split_by_archive_status(source_dir, dest_root, extension_set)
+    summary.scanned_total = len(archived) + len(pending)
+
+    work = [(src, dest, True) for src, dest in pending] + [(src, dest, False) for src, dest in archived]
+    batch = work[:batch_size]
+    summary.batch_size = len(batch)
+    summary.remaining = len(work) - len(batch)
+    if not batch:
+        return summary
+
+    total = len(batch)
+    progress = Progress(total)
+    label = "Migrate move (dry-run)" if dry_run else "Migrate move"
+
+    with timed(label):
+        for i, (src_path, dest_path, needs_move) in enumerate(batch, start=1):
+            try:
+                if needs_move:
+                    if not dry_run:
+                        dest_path.parent.mkdir(parents=True, exist_ok=True)
+                        _move_file(src_path, dest_path)
+                    summary.moved += 1
+                else:
+                    # Already archived -- re-verify immediately before
+                    # deleting, same as purge.
+                    size = src_path.stat().st_size
+                    if dest_path.exists() and dest_path.stat().st_size == size:
+                        if not dry_run:
+                            os.remove(src_path)
+                        summary.already_present += 1
+            except OSError as e:
+                summary.failed += 1
+                summary.failed_files.append((str(src_path), str(e)))
+
+            verb = "Would move" if dry_run else "Moving"
+            progress.update(
+                f"{verb}: {i}/{total} ({i * 100 // total}%) moved={summary.moved} "
+                f"already_present={summary.already_present} failed={summary.failed}",
+                i,
+            )
         progress.done()
 
     return summary

@@ -219,12 +219,13 @@ the photo archive.
 If you've got old photos/videos scattered across various folders/structures
 (e.g. already sitting on the NAS from before this tool existed) that you want
 folded into the same `YYYY/MM/DD` archive as everything else, `migrate` does
-that -- as two separate, explicit steps you run whenever you choose to,
-never automatically:
+that -- as explicit steps you run whenever you choose to, never automatically:
 
 ```
 photo-importer migrate copy  --source /Volumes/NAS_SHARE/OldPhotos
 photo-importer migrate purge --source /Volumes/NAS_SHARE/OldPhotos
+# or, for a folder you know is no longer receiving new uploads:
+photo-importer migrate move  --source /Volumes/NAS_SHARE/OldPhotos
 ```
 
 - **`copy`** is always safe and purely additive: it copies files into the
@@ -242,14 +243,40 @@ photo-importer migrate purge --source /Volumes/NAS_SHARE/OldPhotos
   re-send it -- `copy` alone already gets it into the archive without that
   risk; only run `purge` once you're sure a folder is done receiving new
   uploads.)
+- **`move`** is a faster alternative to running `copy` then `purge` back to
+  back, for a folder you've already confirmed is inactive -- same judgement
+  call as `purge`. Source and the archive are normally the same filesystem
+  (the archive is always a subpath of the NAS mount), so files are renamed
+  straight into place instead of copied and separately deleted -- no bytes
+  need to cross SMB at all for a rename, just a directory-entry update.
+  Falls back to copy+delete only if source and archive ever turn out to be
+  on different filesystems. Unlike `copy`, `move` deletes from source
+  immediately for every file it touches (including ones it just moved in),
+  so it carries the same active-upload risk as `purge` -- don't point it at
+  a folder still receiving new uploads.
 
-Both scan recursively (any nested folder structure), process in batches
-(`--batch-size`, default 200 or `migrate.batch_size` in config) so a huge
-catalog doesn't have to be done in one sitting, and are naturally resumable
--- just re-run the same command to continue; each run figures out what's
-still pending fresh rather than tracking a separate cursor/checkpoint file.
-Both refuse to run (before touching anything) if `--source` overlaps with
-the archive destination itself, and support `--dry-run`.
+All three scan recursively (any nested folder structure), process in
+batches (`--batch-size`, default 200 or `migrate.batch_size` in config) so a
+huge catalog doesn't have to be done in one sitting, and are naturally
+resumable -- just re-run the same command to continue; each run figures out
+what's still pending fresh rather than tracking a separate cursor/checkpoint
+file. All three refuse to run (before touching anything) if `--source`
+overlaps with the archive destination itself, and support `--dry-run`.
+
+By default the destination is the NAS mount + `nas.remote_subpath` from
+config, and the NAS must be mounted. Pass `--dest` to consolidate into any
+other folder instead -- this skips the NAS-mount check entirely, so
+`migrate` can run standalone (no `config.yaml`, no NAS) against any two
+folders on disk:
+
+```
+photo-importer migrate copy --source ~/OldPhotos --dest ~/Archive
+```
+
+Note `move`'s "no bytes cross SMB" shortcut only holds when `--dest` stays
+on the same filesystem as `--source` (true by default, since the archive is
+a subpath of the NAS mount); pointed elsewhere, it transparently falls back
+to copy+delete per file.
 
 ## Platform support
 

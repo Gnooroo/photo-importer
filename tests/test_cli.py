@@ -2,6 +2,7 @@ from unittest.mock import patch
 
 from photo_importer import cli
 from photo_importer.importer import ImportSummary
+from photo_importer.migrate import CopySummary
 from photo_importer.one_shot import OneShotResult
 
 
@@ -60,6 +61,39 @@ def test_one_shot_output_includes_synced_count_when_nas_available(tmp_path, caps
     assert "New: 0" in out
     assert "Already imported (skipped): 983" in out
     assert "Synced to NAS: 2511/2511 files" in out
+
+
+def test_migrate_dest_override_skips_nas_mount_check(tmp_path):
+    dest = tmp_path / "archive"
+    with patch("photo_importer.cli.load_config") as mock_load, \
+         patch("photo_importer.cli.nas_sync.require_mounted") as mock_require_mounted, \
+         patch("photo_importer.cli.migrate.run_copy", return_value=CopySummary()) as mock_run_copy:
+        mock_load.return_value.migrate_source_path = None
+        mock_load.return_value.migrate_batch_size = 200
+        mock_load.return_value.extension_set = {".jpg"}
+        args = cli._build_parser().parse_args(
+            ["migrate", "copy", "--source", str(tmp_path / "src"), "--dest", str(dest)]
+        )
+        cli._cmd_migrate_copy(args)
+
+    mock_require_mounted.assert_not_called()
+    dest_root_arg = mock_run_copy.call_args[0][1]
+    assert dest_root_arg == str(dest)
+
+
+def test_migrate_without_dest_still_requires_nas_mount(tmp_path):
+    with patch("photo_importer.cli.load_config") as mock_load, \
+         patch("photo_importer.cli.nas_sync.require_mounted") as mock_require_mounted, \
+         patch("photo_importer.cli.migrate.run_copy", return_value=CopySummary()):
+        mock_load.return_value.migrate_source_path = None
+        mock_load.return_value.migrate_batch_size = 200
+        mock_load.return_value.extension_set = {".jpg"}
+        mock_load.return_value.nas_mount_point = "/Volumes/nas"
+        mock_load.return_value.nas_remote_subpath = "Photos"
+        args = cli._build_parser().parse_args(["migrate", "copy", "--source", str(tmp_path / "src")])
+        cli._cmd_migrate_copy(args)
+
+    mock_require_mounted.assert_called_once_with("/Volumes/nas")
 
 
 def test_one_shot_output_skips_synced_count_when_nas_unavailable(tmp_path, capsys):

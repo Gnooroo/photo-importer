@@ -1,3 +1,5 @@
+import errno
+import os
 from datetime import datetime
 from unittest.mock import patch
 
@@ -238,3 +240,146 @@ def test_purge_refuses_overlapping_source_and_dest(tmp_path, overlap_case):
 
     with pytest.raises(migrate.MigrateError, match="overlap"):
         migrate.run_purge(str(source), str(dest), {".jpg"}, batch_size=200)
+
+
+# ---------- run_move ----------
+
+def test_move_new_file_renames_into_archive(tmp_path):
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "IMG_0001.jpg").write_bytes(b"aaa")
+    dest_root = tmp_path / "archive"
+
+    with _with_dates():
+        summary = migrate.run_move(str(source), str(dest_root), {".jpg"}, batch_size=200)
+
+    dest = dest_root / "2024" / "03" / "15" / "IMG_0001.jpg"
+    assert dest.read_bytes() == b"aaa"
+    assert summary.moved == 1
+    assert summary.already_present == 0
+    assert summary.scanned_total == 1
+    assert summary.batch_size == 1
+    # source gone -- unlike copy, move deletes it
+    assert not (source / "IMG_0001.jpg").exists()
+
+
+def test_move_deletes_source_when_already_in_archive(tmp_path):
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "IMG_0001.jpg").write_bytes(b"aaa")
+    dest_root = tmp_path / "archive"
+    dest_dir = dest_root / "2024" / "03" / "15"
+    dest_dir.mkdir(parents=True)
+    (dest_dir / "IMG_0001.jpg").write_bytes(b"aaa")
+
+    with _with_dates():
+        summary = migrate.run_move(str(source), str(dest_root), {".jpg"}, batch_size=200)
+
+    assert summary.moved == 0
+    assert summary.already_present == 1
+    assert not (source / "IMG_0001.jpg").exists()
+    assert (dest_dir / "IMG_0001.jpg").read_bytes() == b"aaa"
+
+
+def test_move_dry_run_changes_nothing(tmp_path):
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "IMG_0001.jpg").write_bytes(b"aaa")
+    dest_root = tmp_path / "archive"
+
+    with _with_dates():
+        summary = migrate.run_move(str(source), str(dest_root), {".jpg"}, batch_size=200, dry_run=True)
+
+    assert summary.moved == 1  # reported as "would move"
+    assert (source / "IMG_0001.jpg").exists()
+    assert not (dest_root / "2024" / "03" / "15" / "IMG_0001.jpg").exists()
+
+
+def test_move_falls_back_to_copy_delete_across_filesystems(tmp_path):
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "IMG_0001.jpg").write_bytes(b"aaa")
+    dest_root = tmp_path / "archive"
+
+    real_replace = os.replace
+    calls = {"n": 0}
+
+    def flaky_replace(src, dst):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise OSError(errno.EXDEV, "cross-device link")
+        return real_replace(src, dst)
+
+    with _with_dates(), patch("photo_importer.migrate.os.replace", side_effect=flaky_replace):
+        summary = migrate.run_move(str(source), str(dest_root), {".jpg"}, batch_size=200)
+
+    dest = dest_root / "2024" / "03" / "15" / "IMG_0001.jpg"
+    assert dest.read_bytes() == b"aaa"
+    assert summary.moved == 1
+    assert summary.failed == 0
+    assert not (source / "IMG_0001.jpg").exists()
+
+
+def test_move_batch_size_limits_and_resumes(tmp_path):
+    source = tmp_path / "source"
+    source.mkdir()
+    for i in range(5):
+        (source / f"IMG_{i:04d}.jpg").write_bytes(b"aaa")
+    dest_root = tmp_path / "archive"
+
+    with _with_dates():
+        first = migrate.run_move(str(source), str(dest_root), {".jpg"}, batch_size=2)
+        second = migrate.run_move(str(source), str(dest_root), {".jpg"}, batch_size=2)
+        third = migrate.run_move(str(source), str(dest_root), {".jpg"}, batch_size=2)
+
+    assert first.scanned_total == 5
+    assert first.moved == 2
+    assert first.remaining == 3
+    assert second.moved == 2
+    assert second.remaining == 1
+    assert third.moved == 1
+    assert third.remaining == 0
+    assert len(list(source.iterdir())) == 0
+
+
+def test_move_records_failure_without_aborting_batch(tmp_path):
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "IMG_0001.jpg").write_bytes(b"aaa")
+    (source / "IMG_0002.jpg").write_bytes(b"bbb")
+    dest_root = tmp_path / "archive"
+
+    real_replace = os.replace
+
+    def flaky_replace(src, dst):
+        if "0001" in str(src):
+            raise OSError("simulated failure")
+        return real_replace(src, dst)
+
+    with _with_dates(), patch("photo_importer.migrate.os.replace", side_effect=flaky_replace):
+        summary = migrate.run_move(str(source), str(dest_root), {".jpg"}, batch_size=200)
+
+    assert summary.failed == 1
+    assert summary.moved == 1
+    assert len(summary.failed_files) == 1
+    assert "IMG_0001.jpg" in summary.failed_files[0][0]
+    assert (source / "IMG_0001.jpg").exists()  # left in place after failure
+    assert (dest_root / "2024" / "03" / "15" / "IMG_0002.jpg").exists()
+
+
+@pytest.mark.parametrize("overlap_case", ["equal", "source_contains_dest", "dest_contains_source"])
+def test_move_refuses_overlapping_source_and_dest(tmp_path, overlap_case):
+    if overlap_case == "equal":
+        source = dest = tmp_path / "shared"
+        source.mkdir()
+    elif overlap_case == "source_contains_dest":
+        source = tmp_path / "outer"
+        dest = source / "inner"
+        dest.mkdir(parents=True)
+    else:
+        dest = tmp_path / "outer"
+        source = dest / "inner"
+        source.mkdir(parents=True)
+
+    with pytest.raises(migrate.MigrateError, match="overlap"):
+        migrate.run_move(str(source), str(dest), {".jpg"}, batch_size=200)
