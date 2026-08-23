@@ -5,20 +5,30 @@ into a local library organized by capture date (`YYYY/MM/DD`), skipping files
 that have already been imported, and syncing that library to a NAS SMB share
 via `rsync`.
 
-## Setup
+## Install
+
+```
+./install.sh
+```
+
+Installs `photo-importer` as a global command via [pipx](https://pipx.pypa.io/)
+(installed via Homebrew first if you don't have it) -- runnable from any
+directory afterward, no venv activation needed. It's an *editable* install
+pointing back at this checkout, so pulling/editing code here takes effect
+immediately; re-run `./install.sh` only if `pyproject.toml`'s dependencies
+change. It also sets up `~/.config/photo-importer/config.yaml` (copying your
+existing repo-root `config.yaml` there if you have one, otherwise from the
+example template) -- see `config.example.yaml` for what to fill in.
+
+Requires [exiftool](https://exiftool.org/) for accurate capture-date detection
+(`brew install exiftool`); without it, file modification time is used instead.
+
+**Working on the code without a global install** -- use a local venv instead:
 
 ```
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -e .
-```
-
-Requires [exiftool](https://exiftool.org/) for accurate capture-date detection
-(`brew install exiftool`); without it, file modification time is used instead.
-
-Copy the config template and fill in your paths:
-
-```
 cp config.example.yaml config.yaml
 ```
 
