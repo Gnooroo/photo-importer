@@ -16,15 +16,40 @@ local_root: /Users/you/Pictures/Imported
 #   - .jpeg
 #   - .heic
 #   - .png
+#   - .tif
+#   - .bmp
+#   - .gif
 #   - .cr2
 #   - .cr3
+#   - .crw
 #   - .nef
+#   - .nrw
 #   - .arw
+#   - .srf
+#   - .sr2
 #   - .dng
+#   - .orf
+#   - .raf
+#   - .rw2
+#   - .rwl
+#   - .pef
+#   - .srw
+#   - .x3f
+#   - .3fr
+#   - .dcr
+#   - .kdc
+#   - .mrw
+#   - .erf
+#   - .mos
+#   - .iiq
+#   - .gpr
+#   - .raw
 #   - .mp4
 #   - .mov
 #   - .avi
 #   - .m4v
+#   - .webm
+#   - .qt
 
 nas:
   # The local mount point where your NAS's SMB share is already mounted.
@@ -55,7 +80,6 @@ nas:
 
 # Used only by `photo-importer migrate copy` / `migrate purge` (consolidating
 # an existing messy catalog into the nas.mount_point/nas.remote_subpath
-# archive -- see README). Both are optional; --source/--batch-size override.
+# archive -- see README). Optional; --source overrides.
 migrate:
   source_path: /Volumes/NAS_SHARE/SomeOldFolderToConsolidate
-  batch_size: 200

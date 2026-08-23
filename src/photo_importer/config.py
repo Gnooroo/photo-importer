@@ -9,9 +9,19 @@ from pathlib import Path
 import yaml
 
 DEFAULT_EXTENSIONS = [
-    ".jpg", ".jpeg", ".heic", ".png",
-    ".cr2", ".cr3", ".nef", ".arw", ".dng",
-    ".mp4", ".mov", ".avi", ".m4v",
+    ".jpg", ".jpeg", ".heic", ".png", ".tif", ".bmp", ".gif",
+    # RAW formats: Canon, Nikon, Sony, Adobe/universal, Olympus, Fujifilm,
+    # Panasonic/Leica, Pentax/Samsung, Sigma, Hasselblad, Kodak, Minolta,
+    # Epson, Leaf, Phase One, GoPro.
+    ".cr2", ".cr3", ".crw",
+    ".nef", ".nrw",
+    ".arw", ".srf", ".sr2",
+    ".dng",
+    ".orf", ".raf", ".rw2", ".rwl",
+    ".pef", ".srw",
+    ".x3f", ".3fr",
+    ".dcr", ".kdc", ".mrw", ".erf", ".mos", ".iiq", ".gpr", ".raw",
+    ".mp4", ".mov", ".avi", ".m4v", ".qt", ".webm",
 ]
 
 def _default_config_locations() -> list[Path]:
@@ -39,7 +49,6 @@ class Config:
     nas_smb_url: str | None = None
     nas_sync_workers: int = 2
     migrate_source_path: str | None = None
-    migrate_batch_size: int = 200
 
     @property
     def extension_set(self) -> set[str]:
@@ -77,7 +86,6 @@ def load_config(explicit_path: str | None = None) -> Config:
         nas_smb_url=nas.get("smb_url"),
         nas_sync_workers=nas.get("sync_workers", 2),
         migrate_source_path=migrate.get("source_path"),
-        migrate_batch_size=migrate.get("batch_size", 200),
     )
 
 

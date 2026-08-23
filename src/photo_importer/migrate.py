@@ -23,16 +23,18 @@ two independent, explicitly-run steps:
 None of the three steps are wired into one-shot/import/sync -- always an
 explicit, separate `photo-importer migrate copy|purge|move` invocation.
 
-Both steps need to know each file's already-archived status before picking
-a batch, not just take a blind prefix slice of the scan: copy never shrinks
-the source, so a naive `files[:batch_size]` would re-confirm the same
-already-copied prefix forever and never reach new files; a naive slice for
-purge has the symmetric problem if a run of not-yet-archived files sits at
-the front of sorted order, permanently blocking progress to purgeable files
-further back. So both scan and date-resolve the *whole* source list up
-front, split into already-done/pending, and only batch-limit the pending
-half -- the actual per-file work (copying bytes, or deleting) stays bounded
-by batch_size either way.
+Each step scans and date-resolves the *whole* source list once up front
+(metadata.get_capture_dates is the expensive part, one exiftool pass over
+every file currently in source), splits into already-done/pending, then
+processes *all* of the pending (or archived, for purge) work in that same
+call -- there used to be a batch_size cap here forcing repeated re-runs to
+drain a large backlog, but each re-run paid for that whole scan+parse again
+even though most of it hadn't changed since the previous run. For copy in
+particular that cost never shrinks (copy never removes anything from
+source), so it made every re-run more expensive than the last. One
+invocation now clears everything the scan finds; it's still naturally
+resumable if interrupted (just re-run), since each run figures out what's
+still pending fresh rather than tracking a separate cursor/checkpoint file.
 """
 
 from __future__ import annotations
@@ -56,31 +58,28 @@ class MigrateError(Exception):
 class CopySummary:
     scanned_total: int = 0
     already_present: int = 0
-    batch_size: int = 0
     copied: int = 0
     failed: int = 0
     failed_files: list[tuple[str, str]] = field(default_factory=list)
-    remaining: int = 0  # pending files not covered by this batch -- re-run to continue
+    skipped_by_extension: dict[str, int] = field(default_factory=dict)
 
 
 @dataclass
 class PurgeSummary:
     scanned_total: int = 0
     not_yet_archived: int = 0
-    batch_size: int = 0
     purged: int = 0
-    remaining: int = 0  # archived-but-not-yet-purged files not covered by this batch
+    skipped_by_extension: dict[str, int] = field(default_factory=dict)
 
 
 @dataclass
 class MoveSummary:
     scanned_total: int = 0
-    batch_size: int = 0
     moved: int = 0  # pending files renamed into the archive
     already_present: int = 0  # already-archived files just deleted from source
     failed: int = 0
     failed_files: list[tuple[str, str]] = field(default_factory=list)
-    remaining: int = 0  # files not covered by this batch -- re-run to continue
+    skipped_by_extension: dict[str, int] = field(default_factory=dict)
 
 
 def _check_no_overlap(source_dir: str, dest_root: str) -> None:
@@ -93,7 +92,7 @@ def _check_no_overlap(source_dir: str, dest_root: str) -> None:
 
 
 def _split_by_archive_status(
-    source_dir: str, dest_root: str, extension_set: set[str]
+    source_dir: str, dest_root: str, extension_set: set[str], skipped_counts: dict[str, int]
 ) -> tuple[list[tuple[Path, Path]], list[tuple[Path, Path]]]:
     """Scan source_dir and resolve every file's archive destination (a
     single batched metadata.get_capture_dates() call for the whole scan, not
@@ -101,7 +100,7 @@ def _split_by_archive_status(
     both are [(src_path, dest_path)] pairs -- archived's dest_path already
     exists with matching size, pending's doesn't (yet).
     """
-    all_files = scanner.scan(source_dir, extension_set)
+    all_files = scanner.scan(source_dir, extension_set, skipped_counts)
     if not all_files:
         return [], []
 
@@ -122,28 +121,24 @@ def run_copy(
     source_dir: str,
     dest_root: str,
     extension_set: set[str],
-    batch_size: int,
     dry_run: bool = False,
 ) -> CopySummary:
     _check_no_overlap(source_dir, dest_root)
     summary = CopySummary()
 
-    archived, pending = _split_by_archive_status(source_dir, dest_root, extension_set)
+    archived, pending = _split_by_archive_status(source_dir, dest_root, extension_set, summary.skipped_by_extension)
     summary.scanned_total = len(archived) + len(pending)
     summary.already_present = len(archived)
 
-    batch = pending[:batch_size]
-    summary.batch_size = len(batch)
-    summary.remaining = len(pending) - len(batch)
-    if not batch:
+    if not pending:
         return summary
 
-    total = len(batch)
+    total = len(pending)
     progress = Progress(total)
     label = "Migrate copy (dry-run)" if dry_run else "Migrate copy"
 
     with timed(label):
-        for i, (src_path, dest_path) in enumerate(batch, start=1):
+        for i, (src_path, dest_path) in enumerate(pending, start=1):
             try:
                 if not dry_run:
                     dest_path.parent.mkdir(parents=True, exist_ok=True)
@@ -169,28 +164,24 @@ def run_purge(
     source_dir: str,
     dest_root: str,
     extension_set: set[str],
-    batch_size: int,
     dry_run: bool = False,
 ) -> PurgeSummary:
     _check_no_overlap(source_dir, dest_root)
     summary = PurgeSummary()
 
-    archived, pending = _split_by_archive_status(source_dir, dest_root, extension_set)
+    archived, pending = _split_by_archive_status(source_dir, dest_root, extension_set, summary.skipped_by_extension)
     summary.scanned_total = len(archived) + len(pending)
     summary.not_yet_archived = len(pending)
 
-    batch = archived[:batch_size]
-    summary.batch_size = len(batch)
-    summary.remaining = len(archived) - len(batch)
-    if not batch:
+    if not archived:
         return summary
 
-    total = len(batch)
+    total = len(archived)
     progress = Progress(total)
     label = "Migrate purge (dry-run)" if dry_run else "Migrate purge"
 
     with timed(label):
-        for i, (src_path, dest_path) in enumerate(batch, start=1):
+        for i, (src_path, dest_path) in enumerate(archived, start=1):
             # Re-verify immediately before deleting -- cheap, and guards
             # against the archive copy having changed since the scan above.
             size = src_path.stat().st_size
@@ -227,28 +218,24 @@ def run_move(
     source_dir: str,
     dest_root: str,
     extension_set: set[str],
-    batch_size: int,
     dry_run: bool = False,
 ) -> MoveSummary:
     _check_no_overlap(source_dir, dest_root)
     summary = MoveSummary()
 
-    archived, pending = _split_by_archive_status(source_dir, dest_root, extension_set)
+    archived, pending = _split_by_archive_status(source_dir, dest_root, extension_set, summary.skipped_by_extension)
     summary.scanned_total = len(archived) + len(pending)
 
     work = [(src, dest, True) for src, dest in pending] + [(src, dest, False) for src, dest in archived]
-    batch = work[:batch_size]
-    summary.batch_size = len(batch)
-    summary.remaining = len(work) - len(batch)
-    if not batch:
+    if not work:
         return summary
 
-    total = len(batch)
+    total = len(work)
     progress = Progress(total)
     label = "Migrate move (dry-run)" if dry_run else "Migrate move"
 
     with timed(label):
-        for i, (src_path, dest_path, needs_move) in enumerate(batch, start=1):
+        for i, (src_path, dest_path, needs_move) in enumerate(work, start=1):
             try:
                 if needs_move:
                     if not dry_run:

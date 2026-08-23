@@ -255,12 +255,13 @@ photo-importer migrate move  --source /Volumes/NAS_SHARE/OldPhotos
   so it carries the same active-upload risk as `purge` -- don't point it at
   a folder still receiving new uploads.
 
-All three scan recursively (any nested folder structure), process in
-batches (`--batch-size`, default 200 or `migrate.batch_size` in config) so a
-huge catalog doesn't have to be done in one sitting, and are naturally
-resumable -- just re-run the same command to continue; each run figures out
-what's still pending fresh rather than tracking a separate cursor/checkpoint
-file. All three refuse to run (before touching anything) if `--source`
+All three scan recursively (any nested folder structure), and process the
+entire backlog found by that scan in one invocation -- metadata is read once
+per run, not once per file, so there's no benefit to splitting a large
+catalog across multiple calls. They're naturally resumable if interrupted --
+just re-run the same command to continue; each run figures out what's still
+pending fresh rather than tracking a separate cursor/checkpoint file. All
+three refuse to run (before touching anything) if `--source`
 overlaps with the archive destination itself, and support `--dry-run`.
 
 By default the destination is the NAS mount + `nas.remote_subpath` from

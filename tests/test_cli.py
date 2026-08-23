@@ -69,7 +69,6 @@ def test_migrate_dest_override_skips_nas_mount_check(tmp_path):
          patch("photo_importer.cli.nas_sync.require_mounted") as mock_require_mounted, \
          patch("photo_importer.cli.migrate.run_copy", return_value=CopySummary()) as mock_run_copy:
         mock_load.return_value.migrate_source_path = None
-        mock_load.return_value.migrate_batch_size = 200
         mock_load.return_value.extension_set = {".jpg"}
         args = cli._build_parser().parse_args(
             ["migrate", "copy", "--source", str(tmp_path / "src"), "--dest", str(dest)]
@@ -86,7 +85,6 @@ def test_migrate_without_dest_still_requires_nas_mount(tmp_path):
          patch("photo_importer.cli.nas_sync.require_mounted") as mock_require_mounted, \
          patch("photo_importer.cli.migrate.run_copy", return_value=CopySummary()):
         mock_load.return_value.migrate_source_path = None
-        mock_load.return_value.migrate_batch_size = 200
         mock_load.return_value.extension_set = {".jpg"}
         mock_load.return_value.nas_mount_point = "/Volumes/nas"
         mock_load.return_value.nas_remote_subpath = "Photos"

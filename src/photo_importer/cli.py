@@ -41,7 +41,6 @@ def _add_migrate_args(parser: argparse.ArgumentParser) -> None:
         help="Archive destination root (default: NAS mount + remote subpath from config). "
         "Overriding this skips the NAS-mount check, so migrate can run standalone against any two folders.",
     )
-    parser.add_argument("--batch-size", type=int, help="Max files to process this run (default from config, or 200)")
     parser.add_argument("--config", help="Path to config.yaml")
     parser.add_argument("--dry-run", action="store_true", help="Show what would happen without changing anything")
 
@@ -164,7 +163,6 @@ def _resolve_migrate_args(args) -> tuple:
         raise ConfigError(
             "Migrate source is not set. Pass --source or set migrate.source_path in your config.yaml."
         )
-    batch_size = args.batch_size or config.migrate_batch_size
     if args.dest:
         dest_root = os.path.expanduser(args.dest)
     else:
@@ -174,56 +172,59 @@ def _resolve_migrate_args(args) -> tuple:
             if config.nas_remote_subpath
             else config.nas_mount_point
         )
-    return source_dir, dest_root, config.extension_set, batch_size
+    return source_dir, dest_root, config.extension_set
+
+
+def _print_skipped_breakdown(skipped_by_extension: dict) -> None:
+    if not skipped_by_extension:
+        return
+    total = sum(skipped_by_extension.values())
+    print(f"Skipped (extension not configured for import): {total}")
+    for ext, count in sorted(skipped_by_extension.items(), key=lambda kv: kv[1], reverse=True):
+        print(f"  {ext}: {count}")
 
 
 def _cmd_migrate_copy(args) -> int:
-    source_dir, dest_root, extension_set, batch_size = _resolve_migrate_args(args)
-    summary = migrate.run_copy(source_dir, dest_root, extension_set, batch_size, dry_run=args.dry_run)
+    source_dir, dest_root, extension_set = _resolve_migrate_args(args)
+    summary = migrate.run_copy(source_dir, dest_root, extension_set, dry_run=args.dry_run)
 
     verb = "Would copy" if args.dry_run else "Copied"
     print(f"Found in source: {summary.scanned_total}")
-    print(f"This batch: {summary.batch_size}")
     print(f"{verb}: {summary.copied}")
     print(f"Already in archive: {summary.already_present}")
     if summary.failed:
         print(f"Failed: {summary.failed}")
         for path, reason in summary.failed_files:
             print(f"  {path}: {reason}")
-    if summary.remaining > 0:
-        print(f"Remaining (re-run to continue): {summary.remaining}")
+    _print_skipped_breakdown(summary.skipped_by_extension)
     return 0
 
 
 def _cmd_migrate_purge(args) -> int:
-    source_dir, dest_root, extension_set, batch_size = _resolve_migrate_args(args)
-    summary = migrate.run_purge(source_dir, dest_root, extension_set, batch_size, dry_run=args.dry_run)
+    source_dir, dest_root, extension_set = _resolve_migrate_args(args)
+    summary = migrate.run_purge(source_dir, dest_root, extension_set, dry_run=args.dry_run)
 
     verb = "Would purge" if args.dry_run else "Purged"
     print(f"Found in source: {summary.scanned_total}")
-    print(f"This batch: {summary.batch_size}")
     print(f"{verb}: {summary.purged}")
     print(f"Not yet archived (left alone): {summary.not_yet_archived}")
-    if summary.remaining > 0:
-        print(f"Remaining (re-run to continue): {summary.remaining}")
+    _print_skipped_breakdown(summary.skipped_by_extension)
     return 0
 
 
 def _cmd_migrate_move(args) -> int:
-    source_dir, dest_root, extension_set, batch_size = _resolve_migrate_args(args)
-    summary = migrate.run_move(source_dir, dest_root, extension_set, batch_size, dry_run=args.dry_run)
+    source_dir, dest_root, extension_set = _resolve_migrate_args(args)
+    summary = migrate.run_move(source_dir, dest_root, extension_set, dry_run=args.dry_run)
 
     verb = "Would move" if args.dry_run else "Moved"
     print(f"Found in source: {summary.scanned_total}")
-    print(f"This batch: {summary.batch_size}")
     print(f"{verb}: {summary.moved}")
     print(f"Already in archive (deleted from source): {summary.already_present}")
     if summary.failed:
         print(f"Failed: {summary.failed}")
         for path, reason in summary.failed_files:
             print(f"  {path}: {reason}")
-    if summary.remaining > 0:
-        print(f"Remaining (re-run to continue): {summary.remaining}")
+    _print_skipped_breakdown(summary.skipped_by_extension)
     return 0
 
 
