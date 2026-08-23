@@ -1,0 +1,23 @@
+[project]
+name = "photo-importer"
+version = "0.1.0"
+description = "Import photos/videos from a source (e.g. SD card) into a date-organized local library, and sync that library to a NAS over SMB via rsync."
+requires-python = ">=3.9"
+dependencies = [
+    "PyYAML>=6.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+]
+
+[project.scripts]
+photo-importer = "photo_importer.cli:main"
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]

@@ -1,0 +1,37 @@
+# Copy this file to config.yaml (in the repo root, or ~/.config/photo-importer/config.yaml)
+# and fill in your paths.
+
+# Where to import from. "auto" picks the most recently mounted volume under
+# /Volumes (excluding the boot volume and the NAS mount point below) -- handy
+# for "just plug in the SD card and run it". Set an explicit path to be exact.
+source: auto
+
+# Local destination root. Imported files land under <local_root>/YYYY/MM/DD/.
+local_root: /Users/you/Pictures/Imported
+
+# File extensions to import (case-insensitive). Uncomment and edit to customize;
+# otherwise a sensible default list of photo/video formats is used.
+# extensions:
+#   - .jpg
+#   - .jpeg
+#   - .heic
+#   - .png
+#   - .cr2
+#   - .cr3
+#   - .nef
+#   - .arw
+#   - .dng
+#   - .mp4
+#   - .mov
+#   - .avi
+#   - .m4v
+
+nas:
+  # The local mount point where your NAS's SMB share is already mounted.
+  # Mount it yourself first (Finder -> Go -> Connect to Server -> smb://...,
+  # or `mount_smbfs`) -- this tool never stores or handles SMB credentials.
+  mount_point: /Volumes/NAS_SHARE
+
+  # Subfolder under the mount point to sync into (leave blank to sync to the
+  # share's root).
+  remote_subpath: Photos
