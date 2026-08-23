@@ -37,6 +37,7 @@ class Config:
     nas_mount_point: str | None = None
     nas_remote_subpath: str = ""
     nas_smb_url: str | None = None
+    nas_sync_workers: int = 2
     migrate_source_path: str | None = None
     migrate_batch_size: int = 200
 
@@ -74,6 +75,7 @@ def load_config(explicit_path: str | None = None) -> Config:
         nas_mount_point=nas.get("mount_point"),
         nas_remote_subpath=nas.get("remote_subpath", ""),
         nas_smb_url=nas.get("smb_url"),
+        nas_sync_workers=nas.get("sync_workers", 2),
         migrate_source_path=migrate.get("source_path"),
         migrate_batch_size=migrate.get("batch_size", 200),
     )

@@ -64,8 +64,9 @@ def test_background_loop_runs_multiple_passes_while_import_is_slow(tmp_path):
     sync_calls = []
     release_import = threading.Event()
 
-    def fake_sync(local_root, mount_point, remote_subpath, label=None):
+    def fake_sync_with_heartbeat(local_root, mount_point, remote_subpath, label=None, workers=1, interval=15):
         sync_calls.append(label)
+        return True
 
     def slow_import(*a, **k):
         # blocks until the releaser thread lets it through, giving the
@@ -80,7 +81,7 @@ def test_background_loop_runs_multiple_passes_while_import_is_slow(tmp_path):
     with patch("photo_importer.one_shot.source.looks_like_camera_card", return_value=True), \
          patch("photo_importer.one_shot.run_import", side_effect=slow_import), \
          patch("photo_importer.one_shot.nas_sync.ensure_mounted", return_value=True), \
-         patch("photo_importer.one_shot.nas_sync.sync", side_effect=fake_sync), \
+         patch("photo_importer.one_shot.nas_sync.sync_with_heartbeat", side_effect=fake_sync_with_heartbeat), \
          patch("photo_importer.one_shot.nas_sync.count_synced", return_value=(1, 2)), \
          patch("photo_importer.one_shot.BACKGROUND_SYNC_INTERVAL_SECONDS", 0.05):
         releaser_thread = threading.Thread(target=releaser)

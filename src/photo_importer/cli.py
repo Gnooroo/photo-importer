@@ -27,6 +27,13 @@ def _add_import_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--dry-run", action="store_true", help="Show what would be imported without copying")
 
 
+def _add_workers_arg(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--workers", type=int,
+        help="Concurrent rsync workers for NAS sync (default from config, or 2)",
+    )
+
+
 def _add_migrate_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--source", help="Source folder to consolidate from")
     parser.add_argument("--batch-size", type=int, help="Max files to process this run (default from config, or 200)")
@@ -42,6 +49,7 @@ def _build_parser() -> argparse.ArgumentParser:
     _add_migrate_args(migrate_args)
 
     parser = argparse.ArgumentParser(prog="photo-importer", parents=[import_args])
+    _add_workers_arg(parser)
     subparsers = parser.add_subparsers(dest="command")
 
     subparsers.add_parser(
@@ -51,6 +59,7 @@ def _build_parser() -> argparse.ArgumentParser:
     sync_parser = subparsers.add_parser("sync", help="rsync the local library to the NAS")
     sync_parser.add_argument("--config", help="Path to config.yaml")
     sync_parser.add_argument("--local-root", help="Local library root to sync from")
+    _add_workers_arg(sync_parser)
 
     migrate_parser = subparsers.add_parser(
         "migrate", help="Consolidate an existing catalog into the archive (copy/purge steps)"
@@ -87,8 +96,11 @@ def _cmd_sync(args) -> int:
     config = apply_cli_overrides(load_config(args.config), args)
     local_root = require_local_root(config)
     nas_sync.require_mounted(config.nas_mount_point)
+    workers = args.workers or config.nas_sync_workers
 
-    ok = nas_sync.sync_with_heartbeat(local_root, config.nas_mount_point, config.nas_remote_subpath, label="Sync")
+    ok = nas_sync.sync_with_heartbeat(
+        local_root, config.nas_mount_point, config.nas_remote_subpath, label="Sync", workers=workers
+    )
 
     synced, total = nas_sync.count_synced(local_root, config.nas_mount_point, config.nas_remote_subpath)
     print(f"Synced to NAS: {synced}/{total} files")
@@ -103,6 +115,7 @@ def _cmd_one_shot(args) -> int:
     config = apply_cli_overrides(load_config(args.config), args)
     local_root = require_local_root(config)
     source_dir = resolve_source(config.source, config.nas_mount_point)
+    workers = args.workers or config.nas_sync_workers
 
     label = "One-shot (dry-run)" if args.dry_run else "One-shot (total)"
     with timed(label):
@@ -114,6 +127,7 @@ def _cmd_one_shot(args) -> int:
             config.nas_remote_subpath,
             config.nas_smb_url,
             dry_run=args.dry_run,
+            sync_workers=workers,
         )
 
     verb = "Would be new" if args.dry_run else "New"

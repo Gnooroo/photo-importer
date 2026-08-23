@@ -41,32 +41,38 @@ def _background_sync_loop(
     remote_subpath: str,
     import_done: threading.Event,
     result: dict,
+    workers: int = 1,
     interval: int = BACKGROUND_SYNC_INTERVAL_SECONDS,
 ) -> None:
     """Runs sync passes back-to-back (paced by `interval`) for as long as
     import is still running, then one more pass once it's done -- so files
     get pushed to the NAS progressively as import produces them, rather than
     everything piling up for a single pass at the very end.
+
+    Each pass goes through sync_with_heartbeat() (not sync() directly) so a
+    single pass -- now potentially several concurrent rsync workers moving
+    real data for minutes -- still reports count_synced()-based progress
+    *during* the pass, not just at pass boundaries. Without this, a slow
+    parallel pass would sit silent long enough to look hung, the same bug
+    already fixed once this session for the non-parallel case.
     """
     pass_num = 0
     ok = True
     while not import_done.is_set():
         pass_num += 1
-        try:
-            nas_sync.sync(local_root, mount_point, remote_subpath, label=f"Background NAS sync (pass {pass_num})")
-        except nas_sync.NasSyncError as e:
-            ok = False
-            report(f"Warning: background NAS sync pass {pass_num} failed: {e}")
+        pass_ok = nas_sync.sync_with_heartbeat(
+            local_root, mount_point, remote_subpath, label=f"Background NAS sync (pass {pass_num})", workers=workers
+        )
+        ok = ok and pass_ok
         synced, total = nas_sync.count_synced(local_root, mount_point, remote_subpath)
         report(f"Background NAS sync: pass {pass_num} complete ({synced}/{total} files on NAS so far)")
         import_done.wait(timeout=interval)
 
     pass_num += 1
-    try:
-        nas_sync.sync(local_root, mount_point, remote_subpath, label="Background NAS sync (final pass)")
-    except nas_sync.NasSyncError as e:
-        ok = False
-        report(f"Warning: background NAS sync final pass failed: {e}")
+    pass_ok = nas_sync.sync_with_heartbeat(
+        local_root, mount_point, remote_subpath, label="Background NAS sync (final pass)", workers=workers
+    )
+    ok = ok and pass_ok
     synced, total = nas_sync.count_synced(local_root, mount_point, remote_subpath)
     report(f"Background NAS sync: final pass complete ({synced}/{total} files on NAS)")
     result["ok"] = ok
@@ -80,6 +86,7 @@ def run_one_shot(
     nas_remote_subpath: str,
     nas_smb_url: str | None,
     dry_run: bool = False,
+    sync_workers: int = 1,
 ) -> OneShotResult:
     if not source.looks_like_camera_card(source_dir):
         report(
@@ -111,7 +118,9 @@ def run_one_shot(
 
         def _background():
             with regions.region("sync"):
-                _background_sync_loop(local_root, nas_mount_point, nas_remote_subpath, import_done, result)
+                _background_sync_loop(
+                    local_root, nas_mount_point, nas_remote_subpath, import_done, result, workers=sync_workers
+                )
 
         thread = threading.Thread(target=_background, daemon=True)
         thread.start()

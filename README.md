@@ -125,6 +125,19 @@ to the NAS is the usual bottleneck for large photo/video libraries, and a
 wired Ethernet connection (or an NAS-side rsync/SSH service instead of an SMB
 mount, if available) will generally be much faster.
 
+**Parallel sync workers**: since rsync doesn't parallelize file transfers
+within one process, `sync` (standalone and one-shot's background loop) runs
+`nas.sync_workers` (default 2) concurrent rsync invocations instead of one,
+each covering a disjoint slice of the files not yet on the NAS -- worthwhile
+since the real bottleneck is usually network bandwidth, not CPU, and a
+single stream often doesn't saturate it. The file list is computed once
+ourselves, then split by a byte-balanced (not just file-count-balanced)
+greedy assignment -- important because camera libraries mix small JPGs with
+huge video/RAW files, so a naive round-robin split could load one worker
+with all the big files while others sit idle. `--workers N` overrides the
+config value per invocation. Start low; going much higher rarely helps once
+you're bandwidth-bound and can even hurt via contention.
+
 ## Progress reporting
 
 Metadata reading and the copy step print live progress (e.g.

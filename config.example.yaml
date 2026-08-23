@@ -43,6 +43,16 @@ nas:
   # Optional: leave unset to skip auto-mount and just warn if not mounted.
   smb_url: smb://your-nas-hostname/NAS_SHARE
 
+  # Concurrent rsync workers for `sync` (standalone and one-shot's background
+  # loop). rsync itself doesn't parallelize transfers within one process, so
+  # this runs multiple invocations at once, each covering a disjoint,
+  # byte-balanced slice of the files not yet on the NAS -- useful since the
+  # real bottleneck for most home setups is network bandwidth, not CPU, and
+  # a single rsync stream often doesn't saturate it. Start low (1-3); going
+  # much higher rarely helps once you're bandwidth-bound, and can even hurt
+  # via contention. Optional: --workers overrides this per invocation.
+  sync_workers: 2
+
 # Used only by `photo-importer migrate copy` / `migrate purge` (consolidating
 # an existing messy catalog into the nas.mount_point/nas.remote_subpath
 # archive -- see README). Both are optional; --source/--batch-size override.
