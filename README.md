@@ -96,3 +96,11 @@ a warning and a prompt to press Enter before the run continues as an
 import-only pass (NAS sync skipped for that run). Set `nas.smb_url` in
 `config.yaml` to enable the auto-mount attempt; leave it unset to skip
 straight to the warning/prompt when unmounted.
+
+Because one-shot mode acts automatically (including pushing to the NAS), it
+also checks that the source actually looks like a camera card -- i.e. it has
+a top-level `DCIM` folder, per the standard virtually every digital camera
+and phone uses -- before doing anything else, even during `--dry-run`. If it
+doesn't, you'll see a warning and a prompt to press Enter before continuing,
+so a random USB drive doesn't accidentally get scanned/imported/synced into
+the photo archive.

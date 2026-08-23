@@ -68,3 +68,18 @@ def resolve_source(source: str, nas_mount_point: str | None = None) -> str:
     if source == "auto":
         return detect_source_volume(nas_mount_point)
     return validate_source(os.path.expanduser(source))
+
+
+def looks_like_camera_card(source_dir: str) -> bool:
+    """Heuristic: virtually every digital camera (and phone) writes
+    photos/videos under a top-level DCIM/ folder, per the decades-old DCF
+    standard. A generic USB drive used for other files typically won't have
+    one -- this is meant to catch "wrong drive" before it gets imported.
+    """
+    try:
+        return any(
+            name.upper() == "DCIM" and os.path.isdir(os.path.join(source_dir, name))
+            for name in os.listdir(source_dir)
+        )
+    except OSError:
+        return False

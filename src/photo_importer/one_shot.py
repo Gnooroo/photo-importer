@@ -15,7 +15,7 @@ from __future__ import annotations
 import threading
 from dataclasses import dataclass
 
-from . import nas_sync
+from . import nas_sync, source
 from .importer import ImportSummary, run_import
 
 
@@ -45,6 +45,14 @@ def run_one_shot(
     nas_smb_url: str | None,
     dry_run: bool = False,
 ) -> OneShotResult:
+    if not source.looks_like_camera_card(source_dir):
+        print(
+            f"Warning: {source_dir} doesn't look like a camera card (no DCIM folder "
+            "found). This tool is meant for camera SD/microSD cards, not general USB "
+            "storage."
+        )
+        input("Press Enter to continue anyway...")
+
     if dry_run:
         summary = run_import(source_dir, local_root, extension_set, dry_run=True)
         return OneShotResult(summary, nas_available=False, background_sync_ok=False, catchup_sync_ok=False)
