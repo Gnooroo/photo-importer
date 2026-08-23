@@ -13,10 +13,13 @@ Safe to overlap with an in-progress import because:
 from __future__ import annotations
 
 import threading
+import time
 from dataclasses import dataclass
 
 from . import nas_sync, source
 from .importer import ImportSummary, run_import
+
+HEARTBEAT_INTERVAL_SECONDS = 15
 
 
 @dataclass
@@ -34,6 +37,20 @@ def _try_sync(local_root: str, mount_point: str, remote_subpath: str, verbose: b
     except nas_sync.NasSyncError as e:
         print(f"Warning: NAS sync failed: {e}")
         return False
+
+
+def _heartbeat(done_event: threading.Event, label: str, interval: int = HEARTBEAT_INTERVAL_SECONDS) -> None:
+    """Periodically prints a "still running" line while a background sync is
+    in progress. Its own rsync output is silenced (verbose=False) to avoid
+    fighting with the import loop's progress line, but that means without
+    this, there'd be zero feedback for however long the sync takes -- easy
+    to mistake for the tool having frozen rather than genuinely still
+    working on a large backlog.
+    """
+    start = time.monotonic()
+    while not done_event.wait(timeout=interval):
+        elapsed = int(time.monotonic() - start)
+        print(f"{label}: still running... ({elapsed}s elapsed)")
 
 
 def run_one_shot(
@@ -67,18 +84,27 @@ def run_one_shot(
 
     background_sync_ok = False
     thread = None
+    done_event = threading.Event()
     if nas_available:
         result = {}
         print("Starting background NAS sync of existing library...")
 
         def _background():
-            # verbose=False: this runs concurrently with the import loop's own
-            # progress line -- avoid two live per-file streams fighting over
-            # the same terminal.
-            result["ok"] = _try_sync(local_root, nas_mount_point, nas_remote_subpath, verbose=False)
+            try:
+                # verbose=False: this runs concurrently with the import loop's
+                # own progress line -- avoid two live per-file streams
+                # fighting over the same terminal. The heartbeat thread below
+                # covers "is this still running" instead.
+                result["ok"] = _try_sync(local_root, nas_mount_point, nas_remote_subpath, verbose=False)
+            finally:
+                done_event.set()
 
         thread = threading.Thread(target=_background, daemon=True)
         thread.start()
+        heartbeat_thread = threading.Thread(
+            target=_heartbeat, args=(done_event, "Background NAS sync"), daemon=True
+        )
+        heartbeat_thread.start()
 
     summary = run_import(source_dir, local_root, extension_set, dry_run=False)
 
@@ -86,6 +112,7 @@ def run_one_shot(
     if thread is not None:
         thread.join()
         background_sync_ok = result.get("ok", False)
+        print(f"Background NAS sync: {'complete' if background_sync_ok else 'failed'}")
         catchup_sync_ok = _try_sync(local_root, nas_mount_point, nas_remote_subpath)
 
     return OneShotResult(summary, nas_available, background_sync_ok, catchup_sync_ok)

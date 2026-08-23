@@ -1,4 +1,4 @@
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from photo_importer import one_shot
 from photo_importer.importer import ImportSummary
@@ -110,6 +110,37 @@ def test_non_camera_source_warning_also_fires_on_dry_run(tmp_path):
         )
 
     mock_input.assert_called_once()
+
+
+def test_heartbeat_prints_periodically_until_done():
+    printed = []
+    fake_event = MagicMock()
+    fake_event.wait.side_effect = [False, False, True]
+
+    with patch("builtins.print", side_effect=lambda *a, **k: printed.append(a[0] if a else "")):
+        one_shot._heartbeat(fake_event, "Test sync", interval=1)
+
+    assert len(printed) == 2
+    assert all("Test sync: still running" in p for p in printed)
+
+
+def test_background_sync_success_prints_completion_message(tmp_path):
+    printed = []
+
+    def capture_print(*a, **k):
+        printed.append(a[0] if a else "")
+
+    with patch("photo_importer.one_shot.source.looks_like_camera_card", return_value=True), \
+         patch("photo_importer.one_shot.run_import", return_value=_fake_summary()), \
+         patch("photo_importer.one_shot.nas_sync.ensure_mounted", return_value=True), \
+         patch("photo_importer.one_shot.nas_sync.sync"), \
+         patch("builtins.print", side_effect=capture_print):
+        result = one_shot.run_one_shot(
+            "src", str(tmp_path), {".jpg"}, "/Volumes/nas", "Photos", "smb://host/share", dry_run=False
+        )
+
+    assert result.background_sync_ok is True
+    assert any("Background NAS sync: complete" in p for p in printed)
 
 
 def test_camera_source_does_not_prompt_for_that_check(tmp_path):

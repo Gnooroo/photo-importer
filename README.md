@@ -129,10 +129,13 @@ arrive at once and look like the run jumped straight to 100% having done
 nothing (`src/photo_importer/progress.py`). `sync` streams rsync's own
 per-file `-v --progress` output (rsync makes its own tty-vs-not decisions).
 In one-shot mode, the background sync (running concurrently with the import
-loop) is quiet -- just a "starting" line and any failure warning -- so its
-per-file output doesn't fight with the import progress line on the same
-terminal; the catch-up sync that runs after import finishes (when nothing
-else is printing) is verbose as usual.
+loop) suppresses rsync's own per-file output -- so it doesn't fight with the
+import progress line on the same terminal -- but still prints a "starting"
+line, a "still running... (Ns elapsed)" heartbeat every 15s for as long as
+it's active, and a clear complete/failed line when it finishes, so a large
+backlog sync never looks like it's silently hung. The catch-up sync that
+runs after import finishes (when nothing else is printing) is verbose as
+usual.
 
 ## One-shot mode
 
