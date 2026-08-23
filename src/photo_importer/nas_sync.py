@@ -15,9 +15,11 @@ from __future__ import annotations
 import os
 import platform
 import subprocess
+import threading
 import time
 from pathlib import Path
 
+from .output import report
 from .timing import timed
 
 
@@ -84,36 +86,27 @@ def ensure_mounted(mount_point: str, smb_url: str | None, timeout: int = 10) -> 
     return os.path.ismount(mount_point)
 
 
-def sync(
-    local_root: str,
-    mount_point: str,
-    remote_subpath: str = "",
-    verbose: bool = True,
-    label: str = "Sync",
-) -> subprocess.CompletedProcess:
+def sync(local_root: str, mount_point: str, remote_subpath: str = "", label: str = "Sync") -> subprocess.CompletedProcess:
+    """One blocking rsync pass. Always quiet at the rsync level (no -v /
+    --progress / --info=progress2): rsync's own verbose output prints a line
+    per file INCLUDING every already-synced file it's skipping because of
+    --ignore-existing ("Skip existing '<path>'") -- on a large, mostly-synced
+    library that's a huge amount of noise for no information. Meaningful
+    progress instead comes from count_synced() (an independent, trustworthy
+    check of real on-disk state) via sync_with_heartbeat()/one_shot.py's
+    background loop, not from rsync's own chatter.
+    """
     require_mounted(mount_point)
 
     dest = os.path.join(mount_point, remote_subpath) if remote_subpath else mount_point
     os.makedirs(dest, exist_ok=True)
 
     src = local_root.rstrip("/") + "/"
-    cmd = ["rsync", "-a", "--ignore-existing", "--inplace", "--exclude=.*"]
-    if verbose:
-        cmd.append("-v")
-        # macOS ships openrsync (protocol-29-era), which doesn't understand
-        # the newer --info= option -- use --progress there instead. Linux
-        # ships modern GNU rsync (3.1+), which supports the nicer single
-        # rolling-line --info=progress2. (Windows has no built-in rsync at
-        # all; whichever port is on PATH there -- e.g. via WSL or cwrsync --
-        # is assumed GNU-compatible.)
-        cmd.append("--progress" if platform.system() == "Darwin" else "--info=progress2")
-    cmd += [src, dest]
+    cmd = ["rsync", "-a", "--ignore-existing", "--inplace", "--exclude=.*", src, dest]
 
     with timed(label):
-        # Only stderr is captured (for a clean error message on failure) --
-        # stdout is left inherited so progress still streams live to the terminal.
         try:
-            result = subprocess.run(cmd, stderr=subprocess.PIPE, text=True)
+            result = subprocess.run(cmd, capture_output=True, text=True)
         except FileNotFoundError as e:
             raise NasSyncError(
                 "rsync is not installed or not on PATH. On Windows, this typically means "
@@ -122,3 +115,37 @@ def sync(
         if result.returncode != 0:
             raise NasSyncError(f"rsync failed (exit {result.returncode}): {result.stderr.strip()}")
         return result
+
+
+def sync_with_heartbeat(
+    local_root: str,
+    mount_point: str,
+    remote_subpath: str = "",
+    label: str = "Sync",
+    interval: int = 15,
+) -> bool:
+    """Run one sync() pass in the background while periodically reporting
+    real progress (via count_synced(), not rsync's own output) so a
+    long-running sync doesn't sit silent long enough to look hung. Returns
+    True on success, False on failure (reported as a warning, not raised).
+    """
+    done = threading.Event()
+    result: dict = {}
+
+    def _run():
+        try:
+            sync(local_root, mount_point, remote_subpath, label=label)
+            result["ok"] = True
+        except NasSyncError as e:
+            report(f"Warning: {label} failed: {e}")
+            result["ok"] = False
+        finally:
+            done.set()
+
+    thread = threading.Thread(target=_run, daemon=True)
+    thread.start()
+    while not done.wait(timeout=interval):
+        synced, total = count_synced(local_root, mount_point, remote_subpath)
+        report(f"{label}: still running... ({synced}/{total} files on NAS so far)")
+    thread.join()
+    return result.get("ok", False)

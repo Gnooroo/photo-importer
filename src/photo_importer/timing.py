@@ -8,6 +8,8 @@ import time
 from contextlib import contextmanager
 from datetime import datetime
 
+from .output import report
+
 
 def now_str() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -32,12 +34,14 @@ def format_duration(seconds: float) -> str:
 def timed(label: str):
     """Prints "{label} started at ..." on entry and "{label} ended at ...
     (took ...)" on exit -- always, including when the block raises, so a
-    failed operation's duration is still visible.
+    failed operation's duration is still visible. Routes through the active
+    output region if one is set on the calling thread (see output.py),
+    otherwise the plain shared stream.
     """
     start = time.monotonic()
-    print(f"{label} started at {now_str()}", flush=True)
+    report(f"{label} started at {now_str()}")
     try:
         yield
     finally:
         elapsed = time.monotonic() - start
-        print(f"{label} ended at {now_str()} (took {format_duration(elapsed)})", flush=True)
+        report(f"{label} ended at {now_str()} (took {format_duration(elapsed)})")

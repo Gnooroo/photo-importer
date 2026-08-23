@@ -86,9 +86,15 @@ def _cmd_import(args) -> int:
 def _cmd_sync(args) -> int:
     config = apply_cli_overrides(load_config(args.config), args)
     local_root = require_local_root(config)
-    nas_sync.sync(local_root, config.nas_mount_point, config.nas_remote_subpath)
+    nas_sync.require_mounted(config.nas_mount_point)
+
+    ok = nas_sync.sync_with_heartbeat(local_root, config.nas_mount_point, config.nas_remote_subpath, label="Sync")
+
     synced, total = nas_sync.count_synced(local_root, config.nas_mount_point, config.nas_remote_subpath)
     print(f"Synced to NAS: {synced}/{total} files")
+    if not ok:
+        print("Sync failed.", file=sys.stderr)
+        return 1
     print("Sync complete.")
     return 0
 
@@ -116,7 +122,7 @@ def _cmd_one_shot(args) -> int:
     print(f"Already imported (skipped): {result.summary.skipped_duplicate}")
     if not args.dry_run:
         if result.nas_available:
-            print(f"NAS sync: {'ok' if result.catchup_sync_ok else 'failed'}")
+            print(f"NAS sync: {'ok' if result.sync_ok else 'failed'}")
             synced, total = nas_sync.count_synced(local_root, config.nas_mount_point, config.nas_remote_subpath)
             print(f"Synced to NAS: {synced}/{total} files")
         else:

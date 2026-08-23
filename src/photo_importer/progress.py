@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import sys
 
+from .output import get_region, print_line
 from .timing import now_time_str
 
 
@@ -32,15 +33,26 @@ class Progress:
         if self.total <= 0:
             return
         message = f"[{now_time_str()}] {message}"
+        region = get_region()
+
         if self.is_tty:
-            print(f"\r{message}", end="", flush=True)
+            if region is not None:
+                region.update(message)
+            else:
+                print_line(f"\r{message}", end="")
             return
+
         pct = done * 100 // self.total
         bucket = pct // self.throttle_pct
         if bucket != self._last_bucket or done == self.total:
-            print(message, flush=True)
+            if region is not None:
+                region.update(message)
+            else:
+                print_line(message)
             self._last_bucket = bucket
 
     def done(self) -> None:
+        if get_region() is not None:
+            return  # region stays open -- its owner closes it, not each Progress instance
         if self.is_tty:
-            print()
+            print_line()

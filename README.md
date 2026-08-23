@@ -112,7 +112,7 @@ a clear message when this happens so you can check.
 
 ## Local library vs. NAS: NAS is the archive
 
-Sync is a one-way, additive push (`rsync -av --ignore-existing --inplace`, no
+Sync is a one-way, additive push (`rsync -a --ignore-existing --inplace`, no
 `--delete`): it never removes or overwrites anything on the NAS, it only
 copies files that aren't there yet. This is intentional -- the NAS is meant
 to hold everything ever imported, while the local library is disposable and
@@ -127,7 +127,7 @@ mount, if available) will generally be much faster.
 
 ## Progress reporting
 
-Both metadata reading and the copy step print live progress (e.g.
+Metadata reading and the copy step print live progress (e.g.
 `Importing: 342/1528 (22%) imported=340 skipped=2`) so a large card doesn't
 sit silent for minutes. On a real terminal this is a single line that
 overwrites itself in place; when stdout isn't an interactive terminal (piped,
@@ -136,37 +136,53 @@ prints real, newline-terminated lines throttled to roughly every 5% of
 progress -- `\r`-based overwriting only means anything to a real terminal, so
 anything else would otherwise see nothing until the very end, when it'd all
 arrive at once and look like the run jumped straight to 100% having done
-nothing (`src/photo_importer/progress.py`). `sync` streams rsync's own
-per-file `-v --progress` output (rsync makes its own tty-vs-not decisions).
-In one-shot mode, the background sync (running concurrently with the import
-loop) suppresses rsync's own per-file output -- so it doesn't fight with the
-import progress line on the same terminal -- but still prints a "starting"
-line, a "still running... (Ns elapsed)" heartbeat every 15s for as long as
-it's active, and a clear complete/failed line when it finishes, so a large
-backlog sync never looks like it's silently hung. The catch-up sync that
-runs after import finishes (when nothing else is printing) is verbose as
-usual.
+nothing (`src/photo_importer/progress.py`). Every progress line is also
+prefixed with a `[HH:MM:SS]` timestamp.
 
-Every progress line is also prefixed with a `[HH:MM:SS]` timestamp, and each
-major operation prints its own `started at` / `ended at (took ...)` lines
-(`src/photo_importer/timing.py`) -- metadata reading, import as a whole,
-each NAS sync (labeled `Sync`, `Background NAS sync`, or `Catch-up NAS sync`
-depending on which one it is), and, in one-shot mode, the whole run
-(`One-shot (total)`, which is a genuinely different number from
-import-time + sync-time since they overlap). This is meant to make it easy
-to go back through a log afterward and see exactly how long each part of a
-run took, not just watch it live.
+`sync` never uses rsync's own `-v`/`--progress` output -- on a large, mostly-
+already-synced library those print a line for *every* file rsync considers,
+including ones skipped because they're already there ("Skip existing
+'<path>'"), which is enormous, useless noise. Progress instead comes from
+`nas_sync.count_synced()`, an independent check of real on-disk state (how
+many local files actually exist on the NAS right now, by path + size) --
+`photo-importer sync` reports this periodically while a long sync is running
+(`sync_with_heartbeat`) and always in its final summary line.
+
+Each major operation also prints its own `started at` / `ended at (took ...)`
+line (`src/photo_importer/timing.py`) -- metadata reading, import as a whole,
+each NAS sync pass, and, in one-shot mode, the whole run (`One-shot (total)`,
+a genuinely different number from import-time + sync-time since they
+overlap -- see below). This is meant to make it easy to go back through a
+log afterward and see exactly how long each part of a run took, not just
+watch it live.
+
+**One-shot mode specifically** runs import and the background NAS sync on
+separate threads at the same time, so their progress lines could otherwise
+land on top of each other -- literally concatenate onto the same line with no
+separator if one thread's message arrives mid-write of the other's unfinished
+`\r` line. Import and sync each get their own persistent status line instead
+(`src/photo_importer/output.py`): two live-updating regions on a real
+terminal (via ANSI cursor positioning), or two clearly `[import]`/`[sync]`
+-prefixed streams of lines otherwise -- so it's always visually obvious both
+are genuinely running concurrently, not just occasionally interleaved.
 
 ## One-shot mode
 
-Running `photo-importer` with no subcommand starts a background sync of the
-local library's current contents *before* copying anything from the source,
-so that backlog transfer overlaps with reading/copying off the card. Once
-import finishes, a final synchronous sync pass catches whatever this run just
-added. This is safe because sync is additive/idempotent (above) and because
-new files are written to a hidden temp name and atomically renamed into place
--- a concurrent sync can never observe (and thus permanently skip, via
-`--ignore-existing`) a partially-written file.
+Running `photo-importer` with no subcommand starts a background NAS sync
+immediately, running continuously and concurrently with import for as long
+as import is still going -- not just once up front and once at the end.
+Every ~15s it does another sync pass and reports how many local files are
+confirmed on the NAS so far; once import finishes it does one final pass to
+catch anything from the last window, so files land on the NAS progressively
+as import produces them rather than all piling up into a single pass only
+after import has completely finished (which would give little to no overlap
+benefit on a run that's mostly new imports rather than backlog). This is
+safe because sync is additive/idempotent (above) and because new files are
+written to a hidden temp name and atomically renamed into place, and
+`sync`'s rsync command excludes dotfiles (`--exclude=.*`) -- a concurrent
+sync pass can never observe (and thus permanently skip, via
+`--ignore-existing`) a partially-written file, no matter how often it runs
+mid-import.
 
 If `nas.mount_point` isn't already mounted, one-shot mode tries to mount it
 automatically via `open <nas.smb_url>` (uses a Keychain-saved login if you

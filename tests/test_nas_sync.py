@@ -1,3 +1,5 @@
+import threading
+import time
 from unittest.mock import patch
 
 import pytest
@@ -16,89 +18,48 @@ def test_raises_when_not_mounted(tmp_path):
             nas_sync.sync(str(tmp_path), mount_point="/Volumes/does_not_exist")
 
 
-def test_sync_command_is_additive_never_deletes(tmp_path):
+def _fake_run_factory(returncode=0, stderr="", capture=None):
+    def fake_run(cmd, capture_output=None, text=None):
+        if capture is not None:
+            capture["cmd"] = cmd
+
+        class Result:
+            pass
+
+        Result.returncode = returncode
+        Result.stderr = stderr
+        return Result()
+
+    return fake_run
+
+
+def test_sync_command_is_additive_never_deletes_and_is_quiet(tmp_path):
     mount_point = tmp_path / "nas"
     mount_point.mkdir()
     local_root = tmp_path / "library"
     local_root.mkdir()
 
-    captured_cmd = {}
-
-    def fake_run(cmd, stderr=None, text=None):
-        captured_cmd["cmd"] = cmd
-
-        class Result:
-            returncode = 0
-            stderr = ""
-
-        return Result()
-
-    with patch("os.path.ismount", return_value=True), patch("subprocess.run", side_effect=fake_run):
+    captured = {}
+    with patch("os.path.ismount", return_value=True), \
+         patch("subprocess.run", side_effect=_fake_run_factory(capture=captured)):
         nas_sync.sync(str(local_root), str(mount_point), remote_subpath="Shared_Photos")
 
-    cmd = captured_cmd["cmd"]
+    cmd = captured["cmd"]
     assert cmd[0] == "rsync"
     assert "--delete" not in cmd
     assert "--delete-after" not in cmd
     assert "--delete-before" not in cmd
     assert "--ignore-existing" in cmd
     assert "--exclude=.*" in cmd
-    assert "--progress" in cmd
-    assert cmd[-1] == str(mount_point / "Shared_Photos")
-    assert cmd[-2] == str(local_root) + "/"
-
-
-def test_sync_verbose_false_omits_progress_flags(tmp_path):
-    mount_point = tmp_path / "nas"
-    mount_point.mkdir()
-    local_root = tmp_path / "library"
-    local_root.mkdir()
-
-    captured_cmd = {}
-
-    def fake_run(cmd, stderr=None, text=None):
-        captured_cmd["cmd"] = cmd
-
-        class Result:
-            returncode = 0
-            stderr = ""
-
-        return Result()
-
-    with patch("os.path.ismount", return_value=True), patch("subprocess.run", side_effect=fake_run):
-        nas_sync.sync(str(local_root), str(mount_point), verbose=False)
-
-    cmd = captured_cmd["cmd"]
+    # no rsync-level verbosity flags -- rsync's own -v prints a line per
+    # already-synced file ("Skip existing '<path>'"), which is pure noise on
+    # a large, mostly-synced library; progress instead comes from
+    # count_synced(), not from rsync's own chatter.
     assert "-v" not in cmd
     assert "--progress" not in cmd
-    assert "--ignore-existing" in cmd  # safety flags stay regardless of verbosity
-
-
-def test_sync_uses_progress2_flag_on_non_macos(tmp_path):
-    mount_point = tmp_path / "nas"
-    mount_point.mkdir()
-    local_root = tmp_path / "library"
-    local_root.mkdir()
-
-    captured_cmd = {}
-
-    def fake_run(cmd, stderr=None, text=None):
-        captured_cmd["cmd"] = cmd
-
-        class Result:
-            returncode = 0
-            stderr = ""
-
-        return Result()
-
-    with patch("os.path.ismount", return_value=True), \
-         patch("subprocess.run", side_effect=fake_run), \
-         patch("platform.system", return_value="Linux"):
-        nas_sync.sync(str(local_root), str(mount_point))
-
-    cmd = captured_cmd["cmd"]
-    assert "--info=progress2" in cmd
-    assert "--progress" not in cmd
+    assert "--info=progress2" not in cmd
+    assert cmd[-1] == str(mount_point / "Shared_Photos")
+    assert cmd[-2] == str(local_root) + "/"
 
 
 def test_sync_wraps_rsync_failure_as_nas_sync_error(tmp_path):
@@ -107,14 +68,8 @@ def test_sync_wraps_rsync_failure_as_nas_sync_error(tmp_path):
     local_root = tmp_path / "library"
     local_root.mkdir()
 
-    def fake_run(cmd, stderr=None, text=None):
-        class Result:
-            returncode = 1
-            stderr = "rsync: some failure\n"
-
-        return Result()
-
-    with patch("os.path.ismount", return_value=True), patch("subprocess.run", side_effect=fake_run):
+    with patch("os.path.ismount", return_value=True), \
+         patch("subprocess.run", side_effect=_fake_run_factory(returncode=1, stderr="rsync: some failure\n")):
         with pytest.raises(nas_sync.NasSyncError, match="rsync failed"):
             nas_sync.sync(str(local_root), str(mount_point))
 
@@ -240,3 +195,42 @@ def test_count_synced_with_remote_subpath(tmp_path):
     synced, total = nas_sync.count_synced(str(local_root), str(mount_point), remote_subpath="Shared_Photos")
 
     assert (synced, total) == (1, 1)
+
+
+def test_sync_with_heartbeat_success_returns_true(tmp_path):
+    with patch("photo_importer.nas_sync.sync") as mock_sync:
+        ok = nas_sync.sync_with_heartbeat(str(tmp_path), "/Volumes/nas", interval=10)
+
+    assert ok is True
+    mock_sync.assert_called_once()
+
+
+def test_sync_with_heartbeat_failure_returns_false_and_reports(tmp_path):
+    with patch("photo_importer.nas_sync.sync", side_effect=nas_sync.NasSyncError("boom")), \
+         patch("photo_importer.nas_sync.report") as mock_report:
+        ok = nas_sync.sync_with_heartbeat(str(tmp_path), "/Volumes/nas", interval=10, label="Test sync")
+
+    assert ok is False
+    assert any("Test sync failed" in str(c) for c in mock_report.call_args_list)
+
+
+def test_sync_with_heartbeat_reports_periodic_progress(tmp_path):
+    release = threading.Event()
+
+    def slow_sync(*a, **k):
+        release.wait(timeout=2)
+
+    with patch("photo_importer.nas_sync.sync", side_effect=slow_sync), \
+         patch("photo_importer.nas_sync.count_synced", return_value=(3, 10)), \
+         patch("photo_importer.nas_sync.report") as mock_report:
+        holder = {}
+        t = threading.Thread(
+            target=lambda: holder.update(ok=nas_sync.sync_with_heartbeat(str(tmp_path), "/Volumes/nas", interval=0.05))
+        )
+        t.start()
+        time.sleep(0.15)  # let a couple of heartbeat intervals pass
+        release.set()
+        t.join(timeout=2)
+
+    assert holder.get("ok") is True
+    assert any("3/10 files on NAS" in str(c) for c in mock_report.call_args_list)
