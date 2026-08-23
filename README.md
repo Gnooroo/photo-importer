@@ -58,10 +58,16 @@ incrementally from a card without worrying about double-copying.
 
 ## Local library vs. NAS: NAS is the archive
 
-`sync` is a one-way, additive push (`rsync -av --ignore-existing`, no
-`--delete`): it never removes or overwrites anything on the NAS, it only
-copies files that aren't there yet. This is intentional -- the NAS is meant
-to hold everything ever imported, while the local library is disposable and
-can be pruned to save space once its contents are confirmed synced. A file
-already present on the NAS at the same relative path is treated as a
-duplicate and skipped, regardless of whether the local copy is still around.
+`sync` is a one-way, additive push
+(`rsync -a --ignore-existing --inplace --info=progress2`, no `--delete`): it
+never removes or overwrites anything on the NAS, it only copies files that
+aren't there yet. This is intentional -- the NAS is meant to hold everything
+ever imported, while the local library is disposable and can be pruned to
+save space once its contents are confirmed synced. A file already present on
+the NAS at the same relative path is treated as a duplicate and skipped,
+regardless of whether the local copy is still around.
+
+If sync feels slow, it's almost always the network, not rsync: a Wi-Fi link
+to the NAS is the usual bottleneck for large photo/video libraries, and a
+wired Ethernet connection (or an NAS-side rsync/SSH service instead of an SMB
+mount, if available) will generally be much faster.

@@ -34,5 +34,8 @@ def sync(local_root: str, mount_point: str, remote_subpath: str = "") -> subproc
     os.makedirs(dest, exist_ok=True)
 
     src = local_root.rstrip("/") + "/"
-    cmd = ["rsync", "-av", "--ignore-existing", src, dest]
+    cmd = [
+        "rsync", "-a", "--ignore-existing", "--inplace", "--info=progress2",
+        src, dest,
+    ]
     return subprocess.run(cmd, check=True)
