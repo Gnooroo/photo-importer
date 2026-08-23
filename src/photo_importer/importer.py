@@ -21,6 +21,23 @@ class ImportSummary:
     imported_files: list[str] = field(default_factory=list)
 
 
+def _safe_copy(src: Path, dst: Path) -> None:
+    """Copy file content and mtime only -- deliberately skips shutil.copy2 /
+    shutil.copystat's flag-copying (chflags). Some SD-card-sourced files
+    (e.g. from exFAT cards) carry a macOS-side "user immutable" flag; even
+    when copying that flag onto the destination succeeds, it then makes the
+    destination file immutable too, breaking the very next step (the atomic
+    rename into place) -- so flags/mode are never propagated, only mtime
+    (needed for metadata.py's mtime-fallback date detection), best-effort.
+    """
+    shutil.copyfile(src, dst)
+    try:
+        st = src.stat()
+        os.utime(dst, (st.st_atime, st.st_mtime))
+    except OSError:
+        pass
+
+
 def _unique_dest_path(dest_path: Path, size: int) -> Path:
     """Resolve a filename collision at dest_path. If nothing exists there yet,
     or the existing file is the same size (treated as the same file), return it
@@ -81,7 +98,7 @@ def run_import(
                 # place. A concurrent reader (e.g. a background NAS sync)
                 # must never observe a partially-written file at its real name.
                 tmp_path = dest_path.with_name(f".{dest_path.name}.tmp")
-                shutil.copy2(src_path, tmp_path)
+                _safe_copy(src_path, tmp_path)
                 os.replace(tmp_path, dest_path)
 
             index.record(filename, size, str(dest_path), capture_date.isoformat())

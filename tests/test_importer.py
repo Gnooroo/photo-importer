@@ -1,6 +1,10 @@
+import os
 import shutil
+import stat
 from datetime import datetime
 from unittest.mock import patch
+
+import pytest
 
 from photo_importer.importer import run_import
 
@@ -96,20 +100,75 @@ def test_copy_uses_temp_name_then_atomic_rename(tmp_path):
     local_root = tmp_path / "library"
     dest = local_root / "2024" / "03" / "15" / "IMG_0001.jpg"
 
-    real_copy2 = shutil.copy2
+    real_copyfile = shutil.copyfile
 
-    def spying_copy2(src, dst):
+    def spying_copyfile(src, dst):
         # A concurrent reader of local_root must never see a file at its real
         # (non-temp) name until the copy is fully done and renamed into place.
         assert not dest.exists()
-        return real_copy2(src, dst)
+        return real_copyfile(src, dst)
 
     with patch(
         "photo_importer.importer.metadata.get_capture_dates",
         side_effect=lambda paths: _mock_dates(paths, datetime(2024, 3, 15, 10, 0, 0)),
-    ), patch("photo_importer.importer.shutil.copy2", side_effect=spying_copy2):
+    ), patch("photo_importer.importer.shutil.copyfile", side_effect=spying_copyfile):
         run_import(str(source), str(local_root), {".jpg"})
 
     assert dest.is_file()
     assert dest.read_bytes() == b"aaa"
     assert list(dest.parent.glob(".*.tmp")) == []
+
+
+def test_copy_survives_utime_permission_error(tmp_path):
+    """If preserving mtime fails for any reason, content must still land
+    correctly -- mtime preservation is best-effort, not required for success.
+    """
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "IMG_0001.jpg").write_bytes(b"aaa")
+
+    local_root = tmp_path / "library"
+    dest = local_root / "2024" / "03" / "15" / "IMG_0001.jpg"
+
+    with patch(
+        "photo_importer.importer.metadata.get_capture_dates",
+        side_effect=lambda paths: _mock_dates(paths, datetime(2024, 3, 15, 10, 0, 0)),
+    ), patch("photo_importer.importer.os.utime", side_effect=PermissionError("utime")):
+        summary = run_import(str(source), str(local_root), {".jpg"})
+
+    assert summary.imported == 1
+    assert dest.read_bytes() == b"aaa"
+
+
+@pytest.mark.skipif(not hasattr(os, "chflags"), reason="chflags is macOS/BSD-only")
+def test_copy_survives_source_file_with_immutable_flag(tmp_path):
+    """Regression test for a real crash: some SD-card-sourced files (seen
+    with exFAT-formatted camera cards) carry a macOS "user immutable" flag.
+    Propagating that flag to the destination (as shutil.copy2/copystat would)
+    makes the destination file immutable too, which then breaks the very
+    next step -- the atomic rename into place. _safe_copy must never
+    propagate flags, so this must succeed end-to-end.
+    """
+    source = tmp_path / "source"
+    source.mkdir()
+    src_file = source / "IMG_0001.jpg"
+    src_file.write_bytes(b"aaa")
+    os.chflags(str(src_file), stat.UF_IMMUTABLE)
+
+    local_root = tmp_path / "library"
+    dest = local_root / "2024" / "03" / "15" / "IMG_0001.jpg"
+
+    try:
+        with patch(
+            "photo_importer.importer.metadata.get_capture_dates",
+            side_effect=lambda paths: _mock_dates(paths, datetime(2024, 3, 15, 10, 0, 0)),
+        ):
+            summary = run_import(str(source), str(local_root), {".jpg"})
+    finally:
+        os.chflags(str(src_file), 0)  # allow tmp_path cleanup
+
+    assert summary.imported == 1
+    assert dest.read_bytes() == b"aaa"
+
+    assert summary.imported == 1
+    assert dest.read_bytes() == b"aaa"
