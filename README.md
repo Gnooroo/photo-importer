@@ -86,6 +86,20 @@ Each import records `filename:size -> destination path` in
 overlapping source skips anything already in the index, so you can import
 incrementally from a card without worrying about double-copying.
 
+## Recovering from an interrupted import
+
+New files are copied to a hidden temp name (`.filename.ext.tmp`) and only
+atomically renamed to their real name once the copy finishes -- if the tool
+crashes or is killed mid-copy, the next `import` run automatically finds and
+removes any such leftover temp files before doing anything else. They're
+always **deleted, not resumed/promoted**: an orphaned temp file's content
+can't be verified as correct (a crash could have truncated it, and even a
+right-sized one isn't proof against a bad byte during the copy), so the
+source is trusted over the leftover, and the same re-run naturally re-copies
+that file cleanly. This is only actually lossy if the original source (e.g.
+the SD card) is no longer available by the time you re-run -- the tool prints
+a clear message when this happens so you can check.
+
 ## Local library vs. NAS: NAS is the archive
 
 Sync is a one-way, additive push (`rsync -av --ignore-existing --inplace`, no

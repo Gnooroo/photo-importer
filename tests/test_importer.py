@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 import pytest
 
-from photo_importer.importer import run_import
+from photo_importer.importer import _cleanup_stale_temp_files, run_import
 
 
 def _mock_dates(paths, when):
@@ -170,5 +170,70 @@ def test_copy_survives_source_file_with_immutable_flag(tmp_path):
     assert summary.imported == 1
     assert dest.read_bytes() == b"aaa"
 
-    assert summary.imported == 1
-    assert dest.read_bytes() == b"aaa"
+
+def test_cleanup_stale_temp_files_removes_leftover_tmp(tmp_path):
+    dest_dir = tmp_path / "2024" / "03" / "15"
+    dest_dir.mkdir(parents=True)
+    stale = dest_dir / ".IMG_0001.jpg.tmp"
+    stale.write_bytes(b"partial")
+    keep = dest_dir / "IMG_0002.jpg"
+    keep.write_bytes(b"real file")
+
+    removed = _cleanup_stale_temp_files(str(tmp_path))
+
+    assert removed == 1
+    assert not stale.exists()
+    assert keep.exists()
+
+
+@pytest.mark.skipif(not hasattr(os, "chflags"), reason="chflags is macOS/BSD-only")
+def test_cleanup_stale_temp_files_clears_immutable_flag_first(tmp_path):
+    dest_dir = tmp_path / "2024" / "03" / "15"
+    dest_dir.mkdir(parents=True)
+    stale = dest_dir / ".IMG_0001.jpg.tmp"
+    stale.write_bytes(b"partial")
+    os.chflags(str(stale), stat.UF_IMMUTABLE)
+
+    removed = _cleanup_stale_temp_files(str(tmp_path))
+
+    assert removed == 1
+    assert not stale.exists()
+
+
+def test_run_import_cleans_up_stale_temp_files_automatically(tmp_path):
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "IMG_0002.jpg").write_bytes(b"bbb")
+
+    local_root = tmp_path / "library"
+    stale_dir = local_root / "2024" / "01" / "01"
+    stale_dir.mkdir(parents=True)
+    (stale_dir / ".SomeOldFile.jpg.tmp").write_bytes(b"partial")
+
+    with patch(
+        "photo_importer.importer.metadata.get_capture_dates",
+        side_effect=lambda paths: _mock_dates(paths, datetime(2024, 3, 15, 10, 0, 0)),
+    ):
+        run_import(str(source), str(local_root), {".jpg"})
+
+    assert not (stale_dir / ".SomeOldFile.jpg.tmp").exists()
+
+
+def test_run_import_dry_run_does_not_clean_up_stale_temp_files(tmp_path):
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "IMG_0002.jpg").write_bytes(b"bbb")
+
+    local_root = tmp_path / "library"
+    stale_dir = local_root / "2024" / "01" / "01"
+    stale_dir.mkdir(parents=True)
+    stale = stale_dir / ".SomeOldFile.jpg.tmp"
+    stale.write_bytes(b"partial")
+
+    with patch(
+        "photo_importer.importer.metadata.get_capture_dates",
+        side_effect=lambda paths: _mock_dates(paths, datetime(2024, 3, 15, 10, 0, 0)),
+    ):
+        run_import(str(source), str(local_root), {".jpg"}, dry_run=True)
+
+    assert stale.exists()

@@ -38,6 +38,41 @@ def _safe_copy(src: Path, dst: Path) -> None:
         pass
 
 
+def _cleanup_stale_temp_files(local_root: str) -> int:
+    """Remove any leftover .{filename}.tmp files under local_root from a
+    previous run that crashed mid-copy (before the atomic rename into
+    place).
+
+    These are always deleted, never "rescued" by renaming into place: a
+    leftover .tmp file's content can't be trusted regardless of size --
+    a crash could have truncated it (an incomplete write), but even a
+    size-correct .tmp isn't proof against silent corruption (a bad byte
+    during the copy, or something touching it while it sat orphaned). The
+    source (e.g. the SD card) is the only thing that can supply a verified,
+    correct copy, and a plain re-run of import will naturally re-copy
+    anything that isn't at its real destination path yet -- so deleting the
+    unverifiable leftover and letting that happen is strictly safer than
+    trying to promote it. This is only actually lossy if the original
+    source is no longer available by the time cleanup runs (caller should
+    surface that risk to the user, not silently discard it).
+    """
+    removed = 0
+    for tmp_path in Path(local_root).rglob(".*.tmp"):
+        try:
+            if hasattr(os, "chflags"):
+                # Defense in depth: some crashes (see _safe_copy) could in
+                # principle leave a flag on the temp file that blocks removal.
+                try:
+                    os.chflags(tmp_path, 0)
+                except OSError:
+                    pass
+            tmp_path.unlink()
+            removed += 1
+        except OSError as e:
+            print(f"Warning: couldn't remove stale temp file {tmp_path}: {e}")
+    return removed
+
+
 def _unique_dest_path(dest_path: Path, size: int) -> Path:
     """Resolve a filename collision at dest_path. If nothing exists there yet,
     or the existing file is the same size (treated as the same file), return it
@@ -61,6 +96,18 @@ def run_import(
     dry_run: bool = False,
 ) -> ImportSummary:
     summary = ImportSummary()
+
+    if not dry_run and os.path.isdir(local_root):
+        removed = _cleanup_stale_temp_files(local_root)
+        if removed:
+            print(
+                f"Removed {removed} incomplete leftover file(s) from a previous "
+                "interrupted run (their content couldn't be verified, so they were "
+                "discarded rather than kept). If the source for those files (e.g. "
+                "the SD card) is still available, this run will re-copy them "
+                "correctly below; if not, that content may be lost."
+            )
+
     index = ImportIndex(local_root)
 
     files = scanner.scan(source_dir, extension_set)
