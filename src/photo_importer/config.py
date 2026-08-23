@@ -14,10 +14,15 @@ DEFAULT_EXTENSIONS = [
     ".mp4", ".mov", ".avi", ".m4v",
 ]
 
-DEFAULT_CONFIG_LOCATIONS = [
-    Path("config.yaml"),
-    Path.home() / ".config" / "photo-importer" / "config.yaml",
-]
+def _default_config_locations() -> list[Path]:
+    locations = [Path("config.yaml")]
+    appdata = os.environ.get("APPDATA")
+    if appdata:
+        # Windows convention -- checked first since it's the more idiomatic
+        # location there when present.
+        locations.append(Path(appdata) / "photo-importer" / "config.yaml")
+    locations.append(Path.home() / ".config" / "photo-importer" / "config.yaml")
+    return locations
 
 
 class ConfigError(Exception):
@@ -44,7 +49,7 @@ def _find_config_file(explicit_path: str | None) -> Path | None:
         if not path.is_file():
             raise ConfigError(f"Config file not found: {path}")
         return path
-    for candidate in DEFAULT_CONFIG_LOCATIONS:
+    for candidate in _default_config_locations():
         if candidate.is_file():
             return candidate
     return None

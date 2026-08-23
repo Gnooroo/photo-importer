@@ -7,21 +7,35 @@ via `rsync`.
 
 ## Install
 
+macOS / Linux:
+
 ```
 ./install.sh
 ```
 
+Windows (PowerShell):
+
+```
+.\install.ps1
+```
+
 Installs `photo-importer` as a global command via [pipx](https://pipx.pypa.io/)
-(installed via Homebrew first if you don't have it) -- runnable from any
-directory afterward, no venv activation needed. It's an *editable* install
-pointing back at this checkout, so pulling/editing code here takes effect
-immediately; re-run `./install.sh` only if `pyproject.toml`'s dependencies
-change. It also sets up `~/.config/photo-importer/config.yaml` (copying your
-existing repo-root `config.yaml` there if you have one, otherwise from the
-example template) -- see `config.example.yaml` for what to fill in.
+(installed first if you don't have it -- via Homebrew on macOS, `pip install
+--user pipx` on Linux/Windows) -- runnable from any directory afterward, no
+venv activation needed. It's an *editable* install pointing back at this
+checkout, so pulling/editing code here takes effect immediately; re-run the
+install script only if `pyproject.toml`'s dependencies change. It also sets up
+a user config file (`~/.config/photo-importer/config.yaml` on macOS/Linux,
+`%APPDATA%\photo-importer\config.yaml` on Windows -- copying your existing
+repo-root `config.yaml` there if you have one, otherwise from the example
+template) -- see `config.example.yaml` for what to fill in.
 
 Requires [exiftool](https://exiftool.org/) for accurate capture-date detection
-(`brew install exiftool`); without it, file modification time is used instead.
+(`brew install exiftool` / your Linux package manager / the Windows installer
+on exiftool.org); without it, file modification time is used instead. NAS
+sync requires `rsync` on PATH -- present by default on macOS and virtually
+all Linux distros, but not on Windows (install it via WSL, or a native port
+like [cwrsync](https://itefix.net/cwrsync)).
 
 **Working on the code without a global install** -- use a local venv instead:
 
@@ -125,3 +139,32 @@ and phone uses -- before doing anything else, even during `--dry-run`. If it
 doesn't, you'll see a warning and a prompt to press Enter before continuing,
 so a random USB drive doesn't accidentally get scanned/imported/synced into
 the photo archive.
+
+## Platform support
+
+Built and tested primarily on macOS -- that's the only platform actually
+exercised end to end. Linux and Windows are supported to the extent described
+below, on a best-effort basis:
+
+- **Source auto-detection** (`source: auto`): macOS checks `/Volumes`; Linux
+  checks `/run/media/$USER`, `/media/$USER`, and `/media`; Windows enumerates
+  drive letters and picks ones the OS reports as removable media. On any
+  platform, `--source /explicit/path` (or a drive letter/UNC path on Windows)
+  always works regardless of auto-detection.
+- **NAS auto-mount** (one-shot mode's `open smb://...` step) is macOS-only --
+  Linux and Windows have no equivalent single-command auto-mount, so one-shot
+  mode just checks whether `nas.mount_point` is already reachable and
+  warns/prompts if not, same as everywhere else. Mount the share yourself
+  first (a cifs/GVFS mount on Linux, a mapped drive letter or UNC path on
+  Windows).
+- **rsync progress flags** are chosen per-OS (`--progress` for macOS's bundled
+  openrsync, `--info=progress2` for the modern GNU rsync Linux typically
+  ships -- assumed for Windows too, since whatever rsync port you install
+  there is usually GNU-compatible).
+- Core logic (scanning, EXIF/mtime dates, dedup index, atomic temp-then-rename
+  copies) uses only cross-platform stdlib path handling and isn't
+  OS-specific.
+
+If something's broken on Linux or Windows, it's very possibly this lack of
+live testing rather than a fundamental design issue -- file paths/behavior
+observed on that platform are the most useful thing to report.

@@ -1,6 +1,7 @@
 """Sync the local library to a NAS SMB share. Assumes the share is already
-mounted (via Finder or `mount_smbfs`) -- this tool never stores or handles
-SMB credentials.
+mounted/mapped (via Finder, `mount_smbfs`, a Linux cifs/GVFS mount, or a
+Windows mapped drive/UNC path) -- this tool never stores or handles SMB
+credentials.
 
 This is a one-way, additive sync: the NAS is the archive of record and is
 expected to accumulate files the local library no longer has (local files may
@@ -12,6 +13,7 @@ re-transferred or overwritten -- only files missing from the NAS get copied.
 from __future__ import annotations
 
 import os
+import platform
 import subprocess
 import time
 
@@ -21,15 +23,18 @@ class NasSyncError(Exception):
 
 
 def ensure_mounted(mount_point: str, smb_url: str | None, timeout: int = 10) -> bool:
-    """Return True if mount_point is (or becomes) mounted. If not already
-    mounted and an smb_url is configured, ask Finder to connect it (`open
-    smb://...` -- uses Keychain-saved credentials if present, otherwise Finder
-    prompts on its own; this tool never handles credentials directly) and poll
-    briefly for the mount to appear.
+    """Return True if mount_point is (or becomes) mounted. On macOS, if not
+    already mounted and an smb_url is configured, ask Finder to connect it
+    (`open smb://...` -- uses Keychain-saved credentials if present,
+    otherwise Finder prompts on its own; this tool never handles credentials
+    directly) and poll briefly for the mount to appear. On Linux/Windows
+    there's no equivalent single-command auto-mount, so this just reports
+    current state -- the caller is expected to warn and let the user mount
+    the share themselves (e.g. `mount -t cifs`, GVFS, or a mapped drive).
     """
     if os.path.ismount(mount_point):
         return True
-    if not smb_url:
+    if not smb_url or platform.system() != "Darwin":
         return False
 
     subprocess.run(["open", smb_url], check=False)
@@ -51,7 +56,8 @@ def sync(
     if not os.path.ismount(mount_point):
         raise NasSyncError(
             f"{mount_point} is not currently mounted. Mount the NAS share first "
-            "(Finder -> Go -> Connect to Server, or `mount_smbfs`), then re-run sync."
+            "(Finder -> Go -> Connect to Server on macOS, a cifs/GVFS mount on "
+            "Linux, or a mapped drive/UNC path on Windows), then re-run sync."
         )
 
     dest = os.path.join(mount_point, remote_subpath) if remote_subpath else mount_point
@@ -60,17 +66,25 @@ def sync(
     src = local_root.rstrip("/") + "/"
     cmd = ["rsync", "-a", "--ignore-existing", "--inplace", "--exclude=.*"]
     if verbose:
-        # -v/--progress rather than --info=progress2: macOS ships openrsync
-        # (protocol-29-era), which doesn't understand the newer --info= option.
-        # Skipped when verbose=False (e.g. one-shot's background pass, which
-        # runs concurrently with the import loop's own progress line -- two
-        # live per-file streams fighting over the same terminal is just noise).
-        cmd += ["-v", "--progress"]
+        cmd.append("-v")
+        # macOS ships openrsync (protocol-29-era), which doesn't understand
+        # the newer --info= option -- use --progress there instead. Linux
+        # ships modern GNU rsync (3.1+), which supports the nicer single
+        # rolling-line --info=progress2. (Windows has no built-in rsync at
+        # all; whichever port is on PATH there -- e.g. via WSL or cwrsync --
+        # is assumed GNU-compatible.)
+        cmd.append("--progress" if platform.system() == "Darwin" else "--info=progress2")
     cmd += [src, dest]
 
     # Only stderr is captured (for a clean error message on failure) -- stdout
-    # is left inherited so -v progress still streams live to the terminal.
-    result = subprocess.run(cmd, stderr=subprocess.PIPE, text=True)
+    # is left inherited so progress still streams live to the terminal.
+    try:
+        result = subprocess.run(cmd, stderr=subprocess.PIPE, text=True)
+    except FileNotFoundError as e:
+        raise NasSyncError(
+            "rsync is not installed or not on PATH. On Windows, this typically means "
+            "installing it via WSL or a port like cwrsync."
+        ) from e
     if result.returncode != 0:
         raise NasSyncError(f"rsync failed (exit {result.returncode}): {result.stderr.strip()}")
     return result
