@@ -45,12 +45,31 @@ def _add_migrate_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--dry-run", action="store_true", help="Show what would happen without changing anything")
 
 
+def _add_backup_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--source",
+        action="append",
+        help="Active backup endpoint to sync from, e.g. a phone backup app's upload folder "
+        "-- repeatable for multiple sources (default: backup.source_paths from config)",
+    )
+    parser.add_argument(
+        "--dest",
+        help="Archive destination root (default: NAS mount + remote subpath from config). "
+        "Overriding this skips the NAS-mount check.",
+    )
+    parser.add_argument("--config", help="Path to config.yaml")
+    parser.add_argument("--dry-run", action="store_true", help="Show what would be copied without copying")
+
+
 def _build_parser() -> argparse.ArgumentParser:
     import_args = argparse.ArgumentParser(add_help=False)
     _add_import_args(import_args)
 
     migrate_args = argparse.ArgumentParser(add_help=False)
     _add_migrate_args(migrate_args)
+
+    backup_args = argparse.ArgumentParser(add_help=False)
+    _add_backup_args(backup_args)
 
     parser = argparse.ArgumentParser(prog="photo-importer", parents=[import_args])
     _add_workers_arg(parser)
@@ -83,6 +102,16 @@ def _build_parser() -> argparse.ArgumentParser:
             "Rename files straight into the archive instead of copy+purge (faster, since "
             "source and archive are normally the same filesystem) -- only for folders you "
             "know are NOT actively receiving new uploads, same as purge"
+        ),
+    )
+
+    subparsers.add_parser(
+        "backup-sync", parents=[backup_args],
+        help=(
+            "Copy new photos/videos from an active backup endpoint (e.g. a phone backup "
+            "app's upload folder) into the NAS archive -- cached, copy-only, additive, "
+            "since files can never be moved out of a folder something else is actively "
+            "writing into"
         ),
     )
 
@@ -179,6 +208,26 @@ def _resolve_migrate_args(args) -> tuple:
     return source_dir, dest_root, config.extension_set
 
 
+def _resolve_backup_args(args) -> tuple:
+    config = load_config(args.config)
+    source_dirs = args.source or config.backup_source_paths
+    if not source_dirs:
+        raise ConfigError(
+            "Backup sync source is not set. Pass --source (repeatable) or set "
+            "backup.source_paths in your config.yaml."
+        )
+    if args.dest:
+        dest_root = os.path.expanduser(args.dest)
+    else:
+        nas_sync.require_mounted(config.nas_mount_point)
+        dest_root = (
+            os.path.join(config.nas_mount_point, config.nas_remote_subpath)
+            if config.nas_remote_subpath
+            else config.nas_mount_point
+        )
+    return source_dirs, dest_root, config.extension_set
+
+
 def _print_skipped_breakdown(skipped_by_extension: dict) -> None:
     if not skipped_by_extension:
         return
@@ -232,6 +281,44 @@ def _cmd_migrate_move(args) -> int:
     return 0
 
 
+def _cmd_backup_sync(args) -> int:
+    source_dirs, dest_root, extension_set = _resolve_backup_args(args)
+    verb = "Would copy" if args.dry_run else "Copied"
+    multi = len(source_dirs) > 1
+    totals = migrate.CopySummary()
+
+    for source_dir in source_dirs:
+        if multi:
+            print(f"== {source_dir} ==")
+        label = f"Backup sync ({source_dir})" if multi else "Backup sync"
+        summary = migrate.run_copy(
+            source_dir, dest_root, extension_set, dry_run=args.dry_run, cache=True, label=label
+        )
+
+        print(f"Found in source: {summary.scanned_total}")
+        print(f"{verb}: {summary.copied}")
+        print(f"Already in archive: {summary.already_present}")
+        if summary.failed:
+            print(f"Failed: {summary.failed}")
+            for path, reason in summary.failed_files:
+                print(f"  {path}: {reason}")
+        _print_skipped_breakdown(summary.skipped_by_extension)
+
+        totals.scanned_total += summary.scanned_total
+        totals.copied += summary.copied
+        totals.already_present += summary.already_present
+        totals.failed += summary.failed
+        if multi:
+            print()
+
+    if multi:
+        print(f"Total across {len(source_dirs)} sources -- found: {totals.scanned_total}, "
+              f"{verb.lower()}: {totals.copied}, already in archive: {totals.already_present}, "
+              f"failed: {totals.failed}")
+
+    return 0
+
+
 def main(argv=None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
@@ -248,6 +335,8 @@ def main(argv=None) -> int:
                 return _cmd_migrate_move(args)
             else:
                 return _cmd_migrate_purge(args)
+        elif args.command == "backup-sync":
+            return _cmd_backup_sync(args)
         else:
             return _cmd_one_shot(args)
     except (ConfigError, SourceError, nas_sync.NasSyncError, migrate.MigrateError) as e:

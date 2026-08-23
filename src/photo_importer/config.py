@@ -63,10 +63,23 @@ class Config:
     nas_smb_url: str | None = None
     nas_sync_workers: int = 2
     migrate_source_path: str | None = None
+    backup_source_paths: list[str] = field(default_factory=list)
 
     @property
     def extension_set(self) -> set[str]:
         return {e.lower() if e.startswith(".") else f".{e.lower()}" for e in self.extensions}
+
+
+def _coerce_str_list(value) -> list[str]:
+    """A config value meant to be a list of paths, accepted as either a YAML
+    list or a single bare string (for a config with just one entry, or an
+    older config written before multiple backup sources were supported).
+    """
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value]
+    return list(value)
 
 
 def _find_config_file(explicit_path: str | None) -> Path | None:
@@ -91,6 +104,7 @@ def load_config(explicit_path: str | None = None) -> Config:
 
     nas = data.get("nas") or {}
     migrate = data.get("migrate") or {}
+    backup = data.get("backup") or {}
     return Config(
         source=data.get("source", "auto"),
         local_root=data.get("local_root"),
@@ -100,6 +114,7 @@ def load_config(explicit_path: str | None = None) -> Config:
         nas_smb_url=nas.get("smb_url"),
         nas_sync_workers=nas.get("sync_workers", 2),
         migrate_source_path=migrate.get("source_path"),
+        backup_source_paths=_coerce_str_list(backup.get("source_paths", backup.get("source_path"))),
     )
 
 

@@ -74,10 +74,19 @@ must already be mounted -- via Finder's "Connect to Server", or
 photo-importer sync
 ```
 
-All three read `config.yaml` from the current directory (or
+**`backup-sync`** -- copy new photos/videos from an active backup endpoint
+(e.g. a phone backup app's upload folder) straight into the NAS archive (see
+"`backup-sync`: syncing an active backup endpoint" below):
+
+```
+photo-importer backup-sync
+```
+
+All four read `config.yaml` from the current directory (or
 `~/.config/photo-importer/config.yaml`); pass `--config path/to/file.yaml` to
 use a different one. `--source` and `--local-root` (one-shot and `import`),
-and `--local-root` (`sync`), override the config file.
+`--local-root` (`sync`), and `--source` (`backup-sync`, repeatable, from
+`backup.source_paths`) override the config file.
 
 Summary output uses `New` / `Already imported (skipped)` rather than
 "Imported" for the already-there count -- on a re-run where everything is
@@ -213,6 +222,50 @@ and phone uses -- before doing anything else, even during `--dry-run`. If it
 doesn't, you'll see a warning and a prompt to press Enter before continuing,
 so a random USB drive doesn't accidentally get scanned/imported/synced into
 the photo archive.
+
+## `backup-sync`: syncing an active backup endpoint
+
+If some other tool actively writes into a folder you don't control -- the
+classic case is your NAS vendor's phone backup app dropping your phone's
+photos/videos there, typically on the NAS itself, not sorted by capture date
+-- `backup-sync` folds new files from there into the same `YYYY/MM/DD`
+archive everything else lands in:
+
+```
+photo-importer backup-sync
+photo-importer backup-sync --source /Volumes/NAS_SHARE/MobileBackup/YourPhone
+photo-importer backup-sync --source /Volumes/NAS_SHARE/MobileBackup/Phone1 --source /Volumes/NAS_SHARE/MobileBackup/Phone2
+photo-importer backup-sync --dry-run
+```
+
+Multiple backup endpoints are supported (`--source` is repeatable, or list
+several under `backup.source_paths` in `config.yaml`) -- e.g. more than one
+family member's phone backing up into its own folder. Each source is synced
+into the same archive as an independent pass with its own cache entry, and
+progress/summary output is broken out per source, with a combined total at
+the end.
+
+It's really `migrate copy` (see below) under a name that matches how you'll
+actually use it: routinely re-run against a folder that only grows. That
+folder is an active backup endpoint -- someone else's upload destination, not
+yours to manage -- so `backup-sync` is copy-only and additive like `copy` --
+it never deletes or moves anything out of it (no `purge`/`move` equivalent),
+which also sidesteps having to know whether the backup app would re-upload a
+file it found missing.
+
+Unlike a plain `migrate copy`, `backup-sync` keeps a small persistent cache
+(next to `config.yaml`, keyed by the source+destination pair) of files
+already confirmed copied, so a routine re-run only has to resolve capture
+dates and check archive presence for files that are actually new -- a
+"nothing new since last time" pass costs almost nothing, even against a
+large and growing backup folder, instead of re-scanning and re-resolving
+metadata for the whole thing every time.
+
+Set `backup.source_paths` in `config.yaml` to avoid passing `--source` every
+time; by default the destination is the same NAS archive `sync` and
+`migrate` use (`nas.mount_point` + `nas.remote_subpath`), and the NAS must
+already be mounted -- pass `--dest` to target a different folder instead
+(skips the NAS-mount check, same as `migrate --dest`).
 
 ## `migrate`: consolidating an existing messy catalog
 

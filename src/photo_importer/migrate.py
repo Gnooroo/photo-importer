@@ -36,20 +36,98 @@ source), so it made every re-run more expensive than the last. One
 invocation now clears everything the scan finds; it's still naturally
 resumable if interrupted (just re-run), since each run figures out what's
 still pending fresh rather than tracking a separate cursor/checkpoint file.
+
+run_copy(cache=True) goes further for a source meant to be re-scanned
+routinely, not just resumed once (see cli.py's `backup-sync` command, wired
+to an active backup endpoint like a phone backup app's upload folder): a
+persistent PathStateCache (sync_cache.py, the same mechanism nas_sync.py
+uses) remembers which files were already confirmed copied, so a
+steady-state re-run skips the exiftool pass and the archive-presence stat
+for anything unchanged since last time, instead of paying the full
+scan+parse cost again on every call.
+
+cache=True also turns on a second, independent cache (_MetadataDateCache,
+below) that memoizes exiftool's resolved capture date per (relative path,
+size, mtime) -- the actual expensive part on a large source. Unlike the
+PathStateCache above (which asserts "this file is confirmed present in the
+archive" and must never be written during dry_run, since a false positive
+there would make a real run silently skip copying something), a resolved
+capture date is a pure function of a file's own bytes: an unchanged file's
+previously-resolved date is still correct regardless of what dry_run did or
+didn't do with it. So this cache is written unconditionally, including
+during --dry-run -- a preview run still warms it, and a real run right
+after doesn't pay for exiftool a second time. The archive-presence check
+itself is never skipped by this cache; only the exiftool call is.
 """
 
 from __future__ import annotations
 
 import errno
+import json
 import os
 from collections.abc import Iterator
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 
 from . import metadata, scanner
+from .config import app_state_dir
 from .importer import resolve_dest_path, safe_copy
 from .progress import Progress
+from .sync_cache import PathStateCache
 from .timing import timed
+
+BACKUP_SYNC_STATE_FILENAME = "backup_sync_state.json"
+BACKUP_METADATA_CACHE_FILENAME = "backup_metadata_cache.json"
+
+
+class _MetadataDateCache:
+    """Persists, per relative path (relative to source_dir), the (size,
+    mtime) last seen alongside the capture date exiftool resolved for it --
+    see the cache=True note above for why this is safe to write even during
+    dry_run, unlike PathStateCache. Scoped only to source_dir (no
+    destination scoping needed: a capture date doesn't depend on where it
+    ends up archived), so its state file lives in app_state_dir(), one
+    shared file across sources keyed by each source's resolved path -- same
+    multi-root merge-on-save shape as PathStateCache.
+    """
+
+    def __init__(self, source_dir: str):
+        self.path = app_state_dir() / BACKUP_METADATA_CACHE_FILENAME
+        self._root_key = str(Path(source_dir).expanduser().resolve())
+        self._dirty = False
+        self._entries: dict[str, list] = self._load_all().get(self._root_key, {})
+
+    def _load_all(self) -> dict:
+        if not self.path.is_file():
+            return {}
+        try:
+            with open(self.path) as f:
+                return json.load(f)
+        except (json.JSONDecodeError, OSError):
+            return {}
+
+    def get(self, rel_path: str, size: int, mtime: float) -> datetime | None:
+        entry = self._entries.get(rel_path)
+        if entry is None or entry[0] != size or entry[1] != mtime:
+            return None
+        return datetime.fromisoformat(entry[2])
+
+    def set(self, rel_path: str, size: int, mtime: float, capture_date: datetime) -> None:
+        entry = [size, mtime, capture_date.isoformat()]
+        if self._entries.get(rel_path) != entry:
+            self._entries[rel_path] = entry
+            self._dirty = True
+
+    def save(self) -> None:
+        if not self._dirty:
+            return
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        data = self._load_all()
+        data[self._root_key] = self._entries
+        with open(self.path, "w") as f:
+            json.dump(data, f)
+        self._dirty = False
 
 
 class MigrateError(Exception):
@@ -94,8 +172,13 @@ def _check_no_overlap(source_dir: str, dest_root: str) -> None:
 
 
 def _iter_archive_status_batches(
-    source_dir: str, dest_root: str, extension_set: set[str], skipped_counts: dict[str, int]
-) -> tuple[int, Iterator[list[tuple[Path, Path, bool]]]]:
+    source_dir: str,
+    dest_root: str,
+    extension_set: set[str],
+    skipped_counts: dict[str, int],
+    cache: "PathStateCache | None" = None,
+    metadata_cache: "_MetadataDateCache | None" = None,
+) -> tuple[int, Iterator[list[tuple[Path, Path | None, bool]]]]:
     """Scan source_dir, then lazily resolve each file's archive destination
     in BATCH_SIZE-sized chunks (metadata.iter_capture_date_batches -- the
     expensive part -- one exiftool pass per chunk, chunks resolved in the
@@ -103,20 +186,94 @@ def _iter_archive_status_batches(
     (scanned_total, batches): batches yields lists of
     (src_path, dest_path, is_archived) in scan order, where is_archived means
     dest_path already exists with matching size.
+
+    If cache is given (only ever passed by run_copy's backup-sync path --
+    see there), a file whose (size, mtime) matches what was recorded the
+    last time it was confirmed present in the archive is trusted without
+    resolving its capture date via exiftool or stat-ing the archive side
+    again -- yielded as (src_path, None, True) up front, ahead of anything
+    that still needs real work. This is what keeps a repeat scan of a
+    steady-state backup endpoint (mostly files already synced last time)
+    from paying for a fresh exiftool pass over the whole thing every run.
+
+    If metadata_cache is also given, anything cache didn't already dispose
+    of is checked there next: a file whose (size, mtime) matches a
+    previously-resolved capture date reuses it directly, skipping exiftool
+    -- but still gets a real, fresh archive-presence check (unlike a `cache`
+    hit above), since a resolved date says nothing about whether the file
+    was ever actually copied. See _MetadataDateCache for why this one is
+    safe to populate even during dry_run.
     """
     all_files = scanner.scan(source_dir, extension_set, skipped_counts)
 
-    def _batches() -> Iterator[list[tuple[Path, Path, bool]]]:
-        for batch_dates in metadata.iter_capture_date_batches(all_files):
+    if cache is None:
+        need_resolve = all_files
+        cached_files: list[Path] = []
+    else:
+        need_resolve = []
+        cached_files = []
+        for f in all_files:
+            st = f.stat()
+            rel = f.relative_to(source_dir).as_posix()
+            if cache.is_verified(rel, st.st_size, st.st_mtime):
+                cached_files.append(f)
+            else:
+                need_resolve.append(f)
+
+    if metadata_cache is None:
+        date_known: list[tuple[Path, datetime]] = []
+        still_need_dates = need_resolve
+    else:
+        date_known = []
+        still_need_dates = []
+        for f in need_resolve:
+            st = f.stat()
+            rel = f.relative_to(source_dir).as_posix()
+            cached_date = metadata_cache.get(rel, st.st_size, st.st_mtime)
+            if cached_date is not None:
+                date_known.append((f, cached_date))
+            else:
+                still_need_dates.append(f)
+
+    def _resolve_item(src_path: Path, capture_date: datetime) -> tuple[Path, Path, bool]:
+        size = src_path.stat().st_size
+        dest_path = resolve_dest_path(dest_root, capture_date, src_path.name, size)
+        is_archived = dest_path.exists() and dest_path.stat().st_size == size
+        return (src_path, dest_path, is_archived)
+
+    def _batches() -> Iterator[list[tuple[Path, Path | None, bool]]]:
+        for i in range(0, len(cached_files), metadata.BATCH_SIZE):
+            chunk = cached_files[i:i + metadata.BATCH_SIZE]
+            yield [(f, None, True) for f in chunk]
+        for i in range(0, len(date_known), metadata.BATCH_SIZE):
+            chunk = date_known[i:i + metadata.BATCH_SIZE]
+            yield [_resolve_item(f, d) for f, d in chunk]
+        for batch_dates in metadata.iter_capture_date_batches(still_need_dates):
             items = []
             for src_path, capture_date in batch_dates.items():
-                size = src_path.stat().st_size
-                dest_path = resolve_dest_path(dest_root, capture_date, src_path.name, size)
-                is_archived = dest_path.exists() and dest_path.stat().st_size == size
-                items.append((src_path, dest_path, is_archived))
+                items.append(_resolve_item(src_path, capture_date))
+                if metadata_cache is not None:
+                    st = src_path.stat()
+                    rel = src_path.relative_to(source_dir).as_posix()
+                    metadata_cache.set(rel, st.st_size, st.st_mtime, capture_date)
             yield items
 
     return len(all_files), _batches()
+
+
+def _mark_source_verified(cache: PathStateCache, source_dir: str, src_path: Path) -> None:
+    """After src_path is confirmed present in the archive (freshly copied,
+    or already there), record its current (size, mtime) into cache so the
+    next run can skip re-resolving and re-verifying it entirely. Re-stats
+    locally (cheap, same source tree just scanned) rather than threading
+    size/mtime through the batch tuples.
+    """
+    try:
+        st = src_path.stat()
+    except OSError:
+        return
+    rel = src_path.relative_to(source_dir).as_posix()
+    cache.mark_verified(rel, st.st_size, st.st_mtime)
 
 
 def run_copy(
@@ -124,26 +281,48 @@ def run_copy(
     dest_root: str,
     extension_set: set[str],
     dry_run: bool = False,
+    cache: bool = False,
+    label: str = "Migrate copy",
 ) -> CopySummary:
+    """cache=True (used by backup-sync -- see cli.py's backup-sync command)
+    turns on two persistent caches, both under app_state_dir(): a
+    PathStateCache (sync_cache.py) keyed by (source_dir, dest_root) that
+    remembers files already confirmed copied -- skipping both exiftool and
+    the archive-presence check for them on a later run, but never written
+    during dry_run, which must not have that side effect -- and a
+    _MetadataDateCache keyed by source_dir alone that remembers each file's
+    resolved capture date, which *is* written during dry_run since reusing
+    a date can never cause a file to be wrongly treated as copied (see its
+    docstring). Together they mean a source that's scanned repeatedly (an
+    active backup endpoint that only grows) doesn't pay the full scan+parse
+    cost on every call, including a preview `--dry-run` before the real one.
+    """
     _check_no_overlap(source_dir, dest_root)
     summary = CopySummary()
 
-    total, batches = _iter_archive_status_batches(source_dir, dest_root, extension_set, summary.skipped_by_extension)
+    state_cache = PathStateCache(BACKUP_SYNC_STATE_FILENAME, source_dir, dest_root) if cache else None
+    metadata_cache = _MetadataDateCache(source_dir) if cache else None
+    total, batches = _iter_archive_status_batches(
+        source_dir, dest_root, extension_set, summary.skipped_by_extension,
+        cache=state_cache, metadata_cache=metadata_cache,
+    )
     summary.scanned_total = total
 
     if not total:
         return summary
 
     progress = Progress(total)
-    label = "Migrate copy (dry-run)" if dry_run else "Migrate copy"
+    run_label = f"{label} (dry-run)" if dry_run else label
     i = 0
 
-    with timed(label):
+    with timed(run_label):
         for batch in batches:
             for src_path, dest_path, is_archived in batch:
                 i += 1
                 if is_archived:
                     summary.already_present += 1
+                    if state_cache is not None and not dry_run:
+                        _mark_source_verified(state_cache, source_dir, src_path)
                 else:
                     try:
                         if not dry_run:
@@ -152,6 +331,8 @@ def run_copy(
                             safe_copy(src_path, tmp_path)
                             os.replace(tmp_path, dest_path)
                         summary.copied += 1
+                        if state_cache is not None and not dry_run:
+                            _mark_source_verified(state_cache, source_dir, src_path)
                     except OSError as e:
                         summary.failed += 1
                         summary.failed_files.append((str(src_path), str(e)))
@@ -162,6 +343,11 @@ def run_copy(
                     i,
                 )
         progress.done()
+
+    if state_cache is not None:
+        state_cache.save()
+    if metadata_cache is not None:
+        metadata_cache.save()
 
     return summary
 

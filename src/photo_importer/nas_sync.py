@@ -13,7 +13,6 @@ re-transferred or overwritten -- only files missing from the NAS get copied.
 from __future__ import annotations
 
 import contextvars
-import json
 import os
 import platform
 import subprocess
@@ -25,6 +24,7 @@ from pathlib import Path
 
 from .config import app_state_dir
 from .output import report
+from .sync_cache import PathStateCache
 from .timing import timed
 
 
@@ -51,74 +51,16 @@ def _is_sync_excluded(name: str) -> bool:
     return name.startswith("._") or (name.startswith(".") and name.endswith(".tmp"))
 
 
-class _SyncStateCache:
-    """Persists, per relative path, the (size, mtime) last confirmed present
-    on the NAS with a matching size -- so a later diff pass can trust that an
-    untouched file (same size and mtime as last time) is still there without
-    stat-ing it on the NAS side again. This is what lets a "nothing changed"
-    sync pass skip re-verifying the whole archive instead of walking and
-    stat-ing every file on both ends every single time.
-
-    Lives under app_state_dir() (next to config.yaml), not inside the photo
-    library itself -- the library is meant to hold only real library
-    content, since it gets rsynced to the NAS verbatim (any dotfile living
-    in there would otherwise have to be specially excluded from every sync,
-    which would also risk excluding a legitimately hidden photo/video).
-    One shared file can hold state for multiple libraries, so entries are
-    keyed by local_root's resolved absolute path; saving re-reads and merges
-    rather than overwriting so concurrent libraries don't clobber each
-    other's state.
-
-    Scoped to a single destination (mount_point + remote_subpath): if that
-    changes, previously-recorded verifications don't mean anything against
-    the new destination, so a mismatched cache entry is discarded rather
-    than trusted.
-
-    A file's mtime changing is exactly the signal that it needs
-    re-verification -- camera-imported photos/videos are effectively
-    write-once, so in steady state mtimes are stable and this cache stays
-    valid indefinitely; touching or re-writing a file naturally invalidates
-    just that one entry.
+class _SyncStateCache(PathStateCache):
+    """PathStateCache scoped to nas_sync's own state file -- see
+    sync_cache.PathStateCache for the shared (size, mtime) verification
+    logic. This is what lets a "nothing changed" sync pass skip
+    re-verifying the whole archive instead of walking and stat-ing every
+    file on both ends every single time.
     """
 
     def __init__(self, local_root: str, dest: str):
-        self.path = app_state_dir() / SYNC_STATE_FILENAME
-        self._root_key = str(Path(local_root).expanduser().resolve())
-        self._dest = dest
-        self._entries: dict[str, list] = {}
-        self._dirty = False
-        root_data = self._load_all().get(self._root_key, {})
-        if root_data.get("dest") == dest:
-            self._entries = root_data.get("entries", {})
-
-    def _load_all(self) -> dict:
-        if not self.path.is_file():
-            return {}
-        try:
-            with open(self.path) as f:
-                return json.load(f)
-        except (json.JSONDecodeError, OSError):
-            return {}
-
-    def is_verified(self, rel_path: str, size: int, mtime: float) -> bool:
-        entry = self._entries.get(rel_path)
-        return entry is not None and entry[0] == size and entry[1] == mtime
-
-    def mark_verified(self, rel_path: str, size: int, mtime: float) -> None:
-        entry = [size, mtime]
-        if self._entries.get(rel_path) != entry:
-            self._entries[rel_path] = entry
-            self._dirty = True
-
-    def save(self) -> None:
-        if not self._dirty:
-            return
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        data = self._load_all()
-        data[self._root_key] = {"dest": self._dest, "entries": self._entries}
-        with open(self.path, "w") as f:
-            json.dump(data, f)
-        self._dirty = False
+        super().__init__(SYNC_STATE_FILENAME, local_root, dest)
 
 
 def require_mounted(mount_point: str | None) -> None:

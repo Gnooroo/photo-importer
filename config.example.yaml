@@ -83,3 +83,13 @@ nas:
 # archive -- see README). Optional; --source overrides.
 migrate:
   source_path: /Volumes/NAS_SHARE/SomeOldFolderToConsolidate
+
+# Used only by `photo-importer backup-sync` -- copies new photos/videos from
+# one or more active backup endpoints (e.g. a phone backup app's upload
+# folder) into the nas.mount_point/nas.remote_subpath archive (cached,
+# copy-only, additive -- see README). Optional; --source (repeatable)
+# overrides. A single bare string is also accepted instead of a list.
+backup:
+  source_paths:
+    - /Volumes/NAS_SHARE/MobileBackup/YourPhone
+    # - /Volumes/NAS_SHARE/MobileBackup/AnotherPhone

@@ -1,5 +1,6 @@
 import errno
 import os
+import time
 from datetime import datetime
 from unittest.mock import patch
 
@@ -140,6 +141,195 @@ def test_copy_refuses_overlapping_source_and_dest(tmp_path, overlap_case):
 
     with pytest.raises(migrate.MigrateError, match="overlap"):
         migrate.run_copy(str(source), str(dest), {".jpg"})
+
+
+# ---------- run_copy cache=True (backup-sync) ----------
+
+def test_copy_cache_second_pass_skips_metadata_entirely(tmp_path):
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "IMG_0001.jpg").write_bytes(b"aaa")
+    dest_root = tmp_path / "archive"
+
+    with _with_dates() as mock_dates:
+        summary1 = migrate.run_copy(str(source), str(dest_root), {".jpg"}, cache=True)
+        assert summary1.copied == 1
+        assert mock_dates.call_count == 1
+
+        summary2 = migrate.run_copy(str(source), str(dest_root), {".jpg"}, cache=True)
+
+    # second pass: the file is unchanged since being confirmed copied, so
+    # it's trusted from cache -- no new exiftool batch is even submitted.
+    assert mock_dates.call_count == 2
+    assert mock_dates.call_args.args[0] == []
+    assert summary2.copied == 0
+    assert summary2.already_present == 1
+    assert summary2.scanned_total == 1
+
+
+def test_copy_cache_rechecks_file_whose_mtime_changed(tmp_path):
+    source = tmp_path / "source"
+    source.mkdir()
+    target = source / "IMG_0001.jpg"
+    target.write_bytes(b"aaa")
+    dest_root = tmp_path / "archive"
+
+    with _with_dates():
+        migrate.run_copy(str(source), str(dest_root), {".jpg"}, cache=True)
+
+        os.utime(target, (time.time() + 100, time.time() + 100))
+
+        with _with_dates() as mock_dates:
+            summary = migrate.run_copy(str(source), str(dest_root), {".jpg"}, cache=True)
+
+    assert mock_dates.call_args.args[0] == [target]
+    assert summary.already_present == 1  # still the same content at the archive path
+
+
+def test_copy_state_cache_not_updated_during_dry_run(tmp_path):
+    """The archive-presence cache specifically must never be written during
+    dry_run: if it were, the real run right after would wrongly trust the
+    file as already archived and skip actually copying it.
+    """
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "IMG_0001.jpg").write_bytes(b"aaa")
+    dest_root = tmp_path / "archive"
+
+    with _with_dates():
+        migrate.run_copy(str(source), str(dest_root), {".jpg"}, dry_run=True, cache=True)
+
+        summary = migrate.run_copy(str(source), str(dest_root), {".jpg"}, cache=True)
+
+    assert summary.copied == 1
+    assert summary.already_present == 0
+    assert (dest_root / "2024" / "03" / "15" / "IMG_0001.jpg").exists()
+
+
+def test_copy_metadata_cache_populated_during_dry_run(tmp_path):
+    """Unlike the archive-presence cache, the capture-date cache IS safe to
+    (and does) update during dry_run -- a resolved date is a pure function
+    of file content, so reusing it can never cause a file to be wrongly
+    treated as already copied. A real run right after a preview dry run
+    should skip exiftool entirely for anything the dry run already saw.
+    """
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "IMG_0001.jpg").write_bytes(b"aaa")
+    dest_root = tmp_path / "archive"
+
+    with _with_dates() as mock_dates:
+        migrate.run_copy(str(source), str(dest_root), {".jpg"}, dry_run=True, cache=True)
+        assert mock_dates.call_count == 1
+
+        summary = migrate.run_copy(str(source), str(dest_root), {".jpg"}, cache=True)
+
+    # second call (the real run): no new exiftool batch, since the dry run
+    # already resolved and cached this file's capture date.
+    assert mock_dates.call_count == 2
+    assert mock_dates.call_args.args[0] == []
+    assert summary.copied == 1  # still a real copy -- presence was rechecked for real
+
+
+def test_copy_without_cache_flag_never_writes_state_file(tmp_path):
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "IMG_0001.jpg").write_bytes(b"aaa")
+    dest_root = tmp_path / "archive"
+
+    with _with_dates():
+        migrate.run_copy(str(source), str(dest_root), {".jpg"})
+
+    from photo_importer.config import app_state_dir
+
+    assert not (app_state_dir() / migrate.BACKUP_SYNC_STATE_FILENAME).exists()
+
+
+def test_copy_cache_state_file_lives_outside_source(tmp_path):
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "IMG_0001.jpg").write_bytes(b"aaa")
+    dest_root = tmp_path / "archive"
+
+    with _with_dates():
+        migrate.run_copy(str(source), str(dest_root), {".jpg"}, cache=True)
+
+    from photo_importer.config import app_state_dir
+
+    assert (app_state_dir() / migrate.BACKUP_SYNC_STATE_FILENAME).is_file()
+    assert not any(p.name == migrate.BACKUP_SYNC_STATE_FILENAME for p in source.rglob("*"))
+
+
+def test_copy_cache_scoped_to_destination(tmp_path):
+    """The archive-presence cache is scoped by destination, so a file
+    confirmed copied to dest_a must still be really (re-)checked and
+    copied against dest_b. The capture-date metadata cache is deliberately
+    NOT scoped by destination (a date doesn't depend on where the file
+    lands), so exiftool itself is still correctly skipped here.
+    """
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "IMG_0001.jpg").write_bytes(b"aaa")
+    dest_a = tmp_path / "archive_a"
+    dest_b = tmp_path / "archive_b"
+
+    with _with_dates():
+        migrate.run_copy(str(source), str(dest_a), {".jpg"}, cache=True)
+
+        with _with_dates() as mock_dates:
+            summary = migrate.run_copy(str(source), str(dest_b), {".jpg"}, cache=True)
+
+    assert mock_dates.call_args.args[0] == []  # metadata cache crosses destinations
+    assert summary.copied == 1  # but the archive-presence check was still real
+    assert (dest_b / "2024" / "03" / "15" / "IMG_0001.jpg").exists()
+
+
+def test_copy_metadata_cache_file_lives_outside_source(tmp_path):
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "IMG_0001.jpg").write_bytes(b"aaa")
+    dest_root = tmp_path / "archive"
+
+    with _with_dates():
+        migrate.run_copy(str(source), str(dest_root), {".jpg"}, cache=True)
+
+    from photo_importer.config import app_state_dir
+
+    assert (app_state_dir() / migrate.BACKUP_METADATA_CACHE_FILENAME).is_file()
+    assert not any(p.name == migrate.BACKUP_METADATA_CACHE_FILENAME for p in source.rglob("*"))
+
+
+def test_copy_without_cache_flag_never_writes_metadata_cache_file(tmp_path):
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "IMG_0001.jpg").write_bytes(b"aaa")
+    dest_root = tmp_path / "archive"
+
+    with _with_dates():
+        migrate.run_copy(str(source), str(dest_root), {".jpg"})
+
+    from photo_importer.config import app_state_dir
+
+    assert not (app_state_dir() / migrate.BACKUP_METADATA_CACHE_FILENAME).exists()
+
+
+def test_copy_metadata_cache_rechecks_file_whose_mtime_changed(tmp_path):
+    source = tmp_path / "source"
+    source.mkdir()
+    target = source / "IMG_0001.jpg"
+    target.write_bytes(b"aaa")
+    dest_root = tmp_path / "archive"
+
+    with _with_dates():
+        migrate.run_copy(str(source), str(dest_root), {".jpg"}, cache=True)
+
+        os.utime(target, (time.time() + 100, time.time() + 100))
+
+        with _with_dates() as mock_dates:
+            migrate.run_copy(str(source), str(dest_root), {".jpg"}, cache=True)
+
+    # mtime changed -- re-resolved for real, not trusted from either cache.
+    assert mock_dates.call_args.args[0] == [target]
 
 
 # ---------- run_purge ----------
