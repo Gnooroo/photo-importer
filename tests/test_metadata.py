@@ -69,3 +69,61 @@ def test_falls_back_to_mtime_when_exiftool_missing(tmp_path):
 
     expected = datetime.fromtimestamp(f.stat().st_mtime)
     assert dates[f] == expected
+
+
+def test_iter_capture_date_batches_yields_multiple_ordered_batches(tmp_path, monkeypatch):
+    monkeypatch.setattr(metadata, "BATCH_SIZE", 2)
+    files = []
+    for i in range(5):
+        f = tmp_path / f"with_exif_{i}.jpg"
+        f.write_bytes(b"data")
+        files.append(f)
+
+    with patch.object(metadata, "exiftool_available", return_value=True), \
+         patch("subprocess.run", side_effect=_fake_run):
+        batches = list(metadata.iter_capture_date_batches(files))
+
+    assert [len(b) for b in batches] == [2, 2, 1]
+    # batches drain in the same order paths were given, and each batch's
+    # keys preserve that same relative order too.
+    assert [p for batch in batches for p in batch] == files
+    for batch in batches:
+        for path, date in batch.items():
+            assert date == datetime(2024, 3, 15, 10, 20, 30)
+
+
+def test_iter_capture_date_batches_falls_back_to_mtime_without_exiftool(tmp_path, monkeypatch):
+    monkeypatch.setattr(metadata, "BATCH_SIZE", 2)
+    files = []
+    for i in range(3):
+        f = tmp_path / f"anything_{i}.jpg"
+        f.write_bytes(b"data")
+        files.append(f)
+
+    with patch.object(metadata, "exiftool_available", return_value=False):
+        batches = list(metadata.iter_capture_date_batches(files))
+
+    assert [len(b) for b in batches] == [2, 1]
+    for f in files:
+        expected = datetime.fromtimestamp(f.stat().st_mtime)
+        matching = [batch[f] for batch in batches if f in batch]
+        assert matching == [expected]
+
+
+def test_get_capture_dates_matches_union_of_batches(tmp_path, monkeypatch):
+    monkeypatch.setattr(metadata, "BATCH_SIZE", 2)
+    files = []
+    for i in range(5):
+        f = tmp_path / f"with_exif_{i}.jpg"
+        f.write_bytes(b"data")
+        files.append(f)
+
+    with patch.object(metadata, "exiftool_available", return_value=True), \
+         patch("subprocess.run", side_effect=_fake_run):
+        dates = metadata.get_capture_dates(files)
+        batches = list(metadata.iter_capture_date_batches(files))
+
+    expected = {}
+    for batch in batches:
+        expected.update(batch)
+    assert dates == expected

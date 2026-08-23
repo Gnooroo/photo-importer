@@ -23,13 +23,14 @@ two independent, explicitly-run steps:
 None of the three steps are wired into one-shot/import/sync -- always an
 explicit, separate `photo-importer migrate copy|purge|move` invocation.
 
-Each step scans and date-resolves the *whole* source list once up front
-(metadata.get_capture_dates is the expensive part, one exiftool pass over
-every file currently in source), splits into already-done/pending, then
-processes *all* of the pending (or archived, for purge) work in that same
-call -- there used to be a batch_size cap here forcing repeated re-runs to
-drain a large backlog, but each re-run paid for that whole scan+parse again
-even though most of it hadn't changed since the previous run. For copy in
+Each step scans the *whole* source list once up front, then date-resolves and
+acts on it in BATCH_SIZE-sized chunks (metadata.iter_capture_date_batches is
+the expensive part, one exiftool pass per chunk) -- a chunk's files are
+copied/purged/moved as soon as that chunk's dates resolve, while the
+metadata thread pool keeps working ahead on later chunks in the background.
+There used to be a batch_size cap here forcing repeated re-runs to drain a
+large backlog, but each re-run paid for that whole scan+parse again even
+though most of it hadn't changed since the previous run. For copy in
 particular that cost never shrinks (copy never removes anything from
 source), so it made every re-run more expensive than the last. One
 invocation now clears everything the scan finds; it's still naturally
@@ -41,6 +42,7 @@ from __future__ import annotations
 
 import errno
 import os
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -91,30 +93,30 @@ def _check_no_overlap(source_dir: str, dest_root: str) -> None:
         )
 
 
-def _split_by_archive_status(
+def _iter_archive_status_batches(
     source_dir: str, dest_root: str, extension_set: set[str], skipped_counts: dict[str, int]
-) -> tuple[list[tuple[Path, Path]], list[tuple[Path, Path]]]:
-    """Scan source_dir and resolve every file's archive destination (a
-    single batched metadata.get_capture_dates() call for the whole scan, not
-    per-file, since that's the expensive part). Returns (archived, pending):
-    both are [(src_path, dest_path)] pairs -- archived's dest_path already
-    exists with matching size, pending's doesn't (yet).
+) -> tuple[int, Iterator[list[tuple[Path, Path, bool]]]]:
+    """Scan source_dir, then lazily resolve each file's archive destination
+    in BATCH_SIZE-sized chunks (metadata.iter_capture_date_batches -- the
+    expensive part -- one exiftool pass per chunk, chunks resolved in the
+    background while the caller acts on earlier ones). Returns
+    (scanned_total, batches): batches yields lists of
+    (src_path, dest_path, is_archived) in scan order, where is_archived means
+    dest_path already exists with matching size.
     """
     all_files = scanner.scan(source_dir, extension_set, skipped_counts)
-    if not all_files:
-        return [], []
 
-    dates = metadata.get_capture_dates(all_files)
-    archived = []
-    pending = []
-    for src_path in all_files:
-        size = src_path.stat().st_size
-        dest_path = resolve_dest_path(dest_root, dates[src_path], src_path.name, size)
-        if dest_path.exists() and dest_path.stat().st_size == size:
-            archived.append((src_path, dest_path))
-        else:
-            pending.append((src_path, dest_path))
-    return archived, pending
+    def _batches() -> Iterator[list[tuple[Path, Path, bool]]]:
+        for batch_dates in metadata.iter_capture_date_batches(all_files):
+            items = []
+            for src_path, capture_date in batch_dates.items():
+                size = src_path.stat().st_size
+                dest_path = resolve_dest_path(dest_root, capture_date, src_path.name, size)
+                is_archived = dest_path.exists() and dest_path.stat().st_size == size
+                items.append((src_path, dest_path, is_archived))
+            yield items
+
+    return len(all_files), _batches()
 
 
 def run_copy(
@@ -126,35 +128,39 @@ def run_copy(
     _check_no_overlap(source_dir, dest_root)
     summary = CopySummary()
 
-    archived, pending = _split_by_archive_status(source_dir, dest_root, extension_set, summary.skipped_by_extension)
-    summary.scanned_total = len(archived) + len(pending)
-    summary.already_present = len(archived)
+    total, batches = _iter_archive_status_batches(source_dir, dest_root, extension_set, summary.skipped_by_extension)
+    summary.scanned_total = total
 
-    if not pending:
+    if not total:
         return summary
 
-    total = len(pending)
     progress = Progress(total)
     label = "Migrate copy (dry-run)" if dry_run else "Migrate copy"
+    i = 0
 
     with timed(label):
-        for i, (src_path, dest_path) in enumerate(pending, start=1):
-            try:
-                if not dry_run:
-                    dest_path.parent.mkdir(parents=True, exist_ok=True)
-                    tmp_path = dest_path.with_name(f".{dest_path.name}.tmp")
-                    safe_copy(src_path, tmp_path)
-                    os.replace(tmp_path, dest_path)
-                summary.copied += 1
-            except OSError as e:
-                summary.failed += 1
-                summary.failed_files.append((str(src_path), str(e)))
+        for batch in batches:
+            for src_path, dest_path, is_archived in batch:
+                i += 1
+                if is_archived:
+                    summary.already_present += 1
+                else:
+                    try:
+                        if not dry_run:
+                            dest_path.parent.mkdir(parents=True, exist_ok=True)
+                            tmp_path = dest_path.with_name(f".{dest_path.name}.tmp")
+                            safe_copy(src_path, tmp_path)
+                            os.replace(tmp_path, dest_path)
+                        summary.copied += 1
+                    except OSError as e:
+                        summary.failed += 1
+                        summary.failed_files.append((str(src_path), str(e)))
 
-            verb = "Would copy" if dry_run else "Copying"
-            progress.update(
-                f"{verb}: {i}/{total} ({i * 100 // total}%) copied={summary.copied} failed={summary.failed}",
-                i,
-            )
+                verb = "Would copy" if dry_run else "Copying"
+                progress.update(
+                    f"{verb}: {i}/{total} ({i * 100 // total}%) copied={summary.copied} failed={summary.failed}",
+                    i,
+                )
         progress.done()
 
     return summary
@@ -169,30 +175,35 @@ def run_purge(
     _check_no_overlap(source_dir, dest_root)
     summary = PurgeSummary()
 
-    archived, pending = _split_by_archive_status(source_dir, dest_root, extension_set, summary.skipped_by_extension)
-    summary.scanned_total = len(archived) + len(pending)
-    summary.not_yet_archived = len(pending)
+    total, batches = _iter_archive_status_batches(source_dir, dest_root, extension_set, summary.skipped_by_extension)
+    summary.scanned_total = total
 
-    if not archived:
+    if not total:
         return summary
 
-    total = len(archived)
     progress = Progress(total)
     label = "Migrate purge (dry-run)" if dry_run else "Migrate purge"
+    i = 0
 
     with timed(label):
-        for i, (src_path, dest_path) in enumerate(archived, start=1):
-            # Re-verify immediately before deleting -- cheap, and guards
-            # against the archive copy having changed since the scan above.
-            size = src_path.stat().st_size
-            still_archived = dest_path.exists() and dest_path.stat().st_size == size
-            if still_archived:
-                if not dry_run:
-                    os.remove(src_path)
-                summary.purged += 1
+        for batch in batches:
+            for src_path, dest_path, is_archived in batch:
+                i += 1
+                if not is_archived:
+                    summary.not_yet_archived += 1
+                else:
+                    # Re-verify immediately before deleting -- cheap, and
+                    # guards against the archive copy having changed since
+                    # the scan above.
+                    size = src_path.stat().st_size
+                    still_archived = dest_path.exists() and dest_path.stat().st_size == size
+                    if still_archived:
+                        if not dry_run:
+                            os.remove(src_path)
+                        summary.purged += 1
 
-            verb = "Would purge" if dry_run else "Purging"
-            progress.update(f"{verb}: {i}/{total} ({i * 100 // total}%) purged={summary.purged}", i)
+                verb = "Would purge" if dry_run else "Purging"
+                progress.update(f"{verb}: {i}/{total} ({i * 100 // total}%) purged={summary.purged}", i)
         progress.done()
 
     return summary
@@ -223,43 +234,62 @@ def run_move(
     _check_no_overlap(source_dir, dest_root)
     summary = MoveSummary()
 
-    archived, pending = _split_by_archive_status(source_dir, dest_root, extension_set, summary.skipped_by_extension)
-    summary.scanned_total = len(archived) + len(pending)
+    total, batches = _iter_archive_status_batches(source_dir, dest_root, extension_set, summary.skipped_by_extension)
+    summary.scanned_total = total
 
-    work = [(src, dest, True) for src, dest in pending] + [(src, dest, False) for src, dest in archived]
-    if not work:
+    if not total:
         return summary
 
-    total = len(work)
+    # Pending renames happen as each batch resolves; already-archived deletes
+    # are buffered and processed last -- preserves the existing "every
+    # pending move happens before any archived delete" ordering (source and
+    # dest are normally the same filesystem, so there's no correctness
+    # reason for this order, but it keeps output/summary behavior stable).
+    deferred_archived: list[tuple[Path, Path]] = []
     progress = Progress(total)
     label = "Migrate move (dry-run)" if dry_run else "Migrate move"
+    i = 0
+
+    def _report() -> None:
+        nonlocal i
+        i += 1
+        verb = "Would move" if dry_run else "Moving"
+        progress.update(
+            f"{verb}: {i}/{total} ({i * 100 // total}%) moved={summary.moved} "
+            f"already_present={summary.already_present} failed={summary.failed}",
+            i,
+        )
 
     with timed(label):
-        for i, (src_path, dest_path, needs_move) in enumerate(work, start=1):
-            try:
-                if needs_move:
+        for batch in batches:
+            for src_path, dest_path, is_archived in batch:
+                if is_archived:
+                    deferred_archived.append((src_path, dest_path))
+                    continue
+                try:
                     if not dry_run:
                         dest_path.parent.mkdir(parents=True, exist_ok=True)
                         _move_file(src_path, dest_path)
                     summary.moved += 1
-                else:
-                    # Already archived -- re-verify immediately before
-                    # deleting, same as purge.
-                    size = src_path.stat().st_size
-                    if dest_path.exists() and dest_path.stat().st_size == size:
-                        if not dry_run:
-                            os.remove(src_path)
-                        summary.already_present += 1
+                except OSError as e:
+                    summary.failed += 1
+                    summary.failed_files.append((str(src_path), str(e)))
+                _report()
+
+        for src_path, dest_path in deferred_archived:
+            try:
+                # Already archived -- re-verify immediately before deleting,
+                # same as purge.
+                size = src_path.stat().st_size
+                if dest_path.exists() and dest_path.stat().st_size == size:
+                    if not dry_run:
+                        os.remove(src_path)
+                    summary.already_present += 1
             except OSError as e:
                 summary.failed += 1
                 summary.failed_files.append((str(src_path), str(e)))
+            _report()
 
-            verb = "Would move" if dry_run else "Moving"
-            progress.update(
-                f"{verb}: {i}/{total} ({i * 100 // total}%) moved={summary.moved} "
-                f"already_present={summary.already_present} failed={summary.failed}",
-                i,
-            )
         progress.done()
 
     return summary

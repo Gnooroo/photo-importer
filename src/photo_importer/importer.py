@@ -140,7 +140,13 @@ def run_import(
         # pass entirely for anything index.contains() already rules out.
         sizes = {f: f.stat().st_size for f in files}
         pending_files = [f for f in files if not index.contains(f.name, sizes[f])]
-        dates = metadata.get_capture_dates(pending_files)
+
+        # Pulled from lazily, one batch at a time, as the loop below reaches a
+        # pending file not yet resolved -- lets copying overlap with the
+        # metadata pool still resolving later batches in the background,
+        # while keeping files processed in the same order they were scanned.
+        pending_date_batches = metadata.iter_capture_date_batches(pending_files)
+        pending_dates: dict[Path, datetime] = {}
 
         total = len(files)
         progress = Progress(total)
@@ -151,7 +157,9 @@ def run_import(
             if index.contains(filename, size):
                 summary.skipped_duplicate += 1
             else:
-                capture_date = dates[src_path]
+                while src_path not in pending_dates:
+                    pending_dates.update(next(pending_date_batches))
+                capture_date = pending_dates.pop(src_path)
                 dest_path = resolve_dest_path(local_root, capture_date, filename, size)
 
                 # Same content already on disk but missing from the index (e.g.

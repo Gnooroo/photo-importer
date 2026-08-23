@@ -8,7 +8,8 @@ import json
 import os
 import shutil
 import subprocess
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 
@@ -56,52 +57,72 @@ def _run_exiftool_batch(paths: list[Path]) -> dict[str, dict]:
     return {entry["SourceFile"]: entry for entry in entries}
 
 
+def iter_capture_date_batches(
+    paths: list[Path], workers: int | None = None
+) -> Iterator[dict[Path, datetime]]:
+    """Like get_capture_dates, but yields one path -> capture date dict per
+    BATCH_SIZE-sized chunk of `paths`, in the same order `paths` was given,
+    as soon as that chunk resolves -- instead of blocking until every chunk
+    is done. This lets a caller start acting on early files (copy/purge/move)
+    while later batches are still being read, without giving up exiftool's
+    per-batch subprocess amortization or reordering output relative to the
+    input list.
+
+    All batches are submitted to the pool up front, so it keeps working
+    ahead in the background regardless of how slowly the caller drains
+    yielded batches -- draining in submission order (not completion order,
+    i.e. not as_completed) is what keeps this order-preserving.
+    """
+    if not paths:
+        return
+
+    if not exiftool_available():
+        for i in range(0, len(paths), BATCH_SIZE):
+            chunk = paths[i:i + BATCH_SIZE]
+            yield {p: datetime.fromtimestamp(p.stat().st_mtime) for p in chunk}
+        return
+
+    total = len(paths)
+    progress = Progress(total)
+    batches = [paths[i:i + BATCH_SIZE] for i in range(0, total, BATCH_SIZE)]
+    worker_count = max(1, workers or DEFAULT_WORKERS)
+    done = 0
+    with timed("Reading metadata"):
+        with ThreadPoolExecutor(max_workers=worker_count) as pool:
+            futures = [pool.submit(_run_exiftool_batch, batch) for batch in batches]
+            # Progress updates happen here, on the main (consuming) thread, as
+            # each batch is drained -- not inside the worker threads. Progress
+            # routes through a contextvar-based output region that isn't
+            # inherited by new threads, so updating from a worker would
+            # silently drop out of an active one-shot region.
+            for batch, future in zip(batches, futures):
+                by_source_file = future.result()
+                batch_dates: dict[Path, datetime] = {}
+                for path in batch:
+                    entry = by_source_file.get(str(path))
+                    date = None
+                    if entry:
+                        date = _parse_exif_date(entry.get("DateTimeOriginal")) or _parse_exif_date(
+                            entry.get("CreateDate")
+                        )
+                    batch_dates[path] = date or datetime.fromtimestamp(path.stat().st_mtime)
+                done += len(batch)
+                progress.update(f"Reading metadata: {done}/{total} ({done * 100 // total}%)", done)
+                yield batch_dates
+        progress.done()
+
+
 def get_capture_dates(paths: list[Path], workers: int | None = None) -> dict[Path, datetime]:
     """Return a mapping of path -> capture date, using exiftool where possible
     and falling back to file mtime for every path exiftool couldn't resolve.
 
     Batches run concurrently across `workers` threads (default
     DEFAULT_WORKERS) -- each batch is an independent exiftool subprocess, so
-    this is real multi-core parallelism, not just concurrency.
+    this is real multi-core parallelism, not just concurrency. This is
+    iter_capture_date_batches drained into a single dict, for callers that
+    don't need to act until every path has resolved.
     """
     dates: dict[Path, datetime] = {}
-    unresolved = list(paths)
-
-    if exiftool_available() and paths:
-        total = len(paths)
-        progress = Progress(total)
-        by_source_file: dict[str, dict] = {}
-        batches = [paths[i:i + BATCH_SIZE] for i in range(0, total, BATCH_SIZE)]
-        worker_count = max(1, workers or DEFAULT_WORKERS)
-        done = 0
-        with timed("Reading metadata"):
-            with ThreadPoolExecutor(max_workers=worker_count) as pool:
-                futures = {pool.submit(_run_exiftool_batch, batch): len(batch) for batch in batches}
-                # Progress updates happen here, on the main thread, as each
-                # future completes -- not inside the worker threads. Progress
-                # routes through a contextvar-based output region that isn't
-                # inherited by new threads, so updating from a worker would
-                # silently drop out of an active one-shot region.
-                for future in as_completed(futures):
-                    by_source_file.update(future.result())
-                    done += futures[future]
-                    progress.update(f"Reading metadata: {done}/{total} ({done * 100 // total}%)", done)
-            progress.done()
-
-        unresolved = []
-        for path in paths:
-            entry = by_source_file.get(str(path))
-            date = None
-            if entry:
-                date = _parse_exif_date(entry.get("DateTimeOriginal")) or _parse_exif_date(
-                    entry.get("CreateDate")
-                )
-            if date:
-                dates[path] = date
-            else:
-                unresolved.append(path)
-
-    for path in unresolved:
-        dates[path] = datetime.fromtimestamp(path.stat().st_mtime)
-
+    for batch_dates in iter_capture_date_batches(paths, workers=workers):
+        dates.update(batch_dates)
     return dates

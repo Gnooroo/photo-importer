@@ -9,8 +9,8 @@ import pytest
 from photo_importer.importer import _cleanup_stale_temp_files, resolve_dest_path, run_import
 
 
-def _mock_dates(paths, when):
-    return {p: when for p in paths}
+def _mock_dates(paths, when, workers=None):
+    yield {p: when for p in paths}
 
 
 def test_import_copies_and_sorts_by_date(tmp_path):
@@ -21,7 +21,7 @@ def test_import_copies_and_sorts_by_date(tmp_path):
     local_root = tmp_path / "library"
 
     with patch(
-        "photo_importer.importer.metadata.get_capture_dates",
+        "photo_importer.importer.metadata.iter_capture_date_batches",
         side_effect=lambda paths: _mock_dates(paths, datetime(2024, 3, 15, 10, 0, 0)),
     ):
         summary = run_import(str(source), str(local_root), {".jpg"})
@@ -43,7 +43,7 @@ def test_second_run_skips_already_imported(tmp_path):
     local_root = tmp_path / "library"
 
     with patch(
-        "photo_importer.importer.metadata.get_capture_dates",
+        "photo_importer.importer.metadata.iter_capture_date_batches",
         side_effect=lambda paths: _mock_dates(paths, datetime(2024, 3, 15, 10, 0, 0)),
     ):
         run_import(str(source), str(local_root), {".jpg"})
@@ -61,7 +61,7 @@ def test_dry_run_does_not_copy_or_persist_index(tmp_path):
     local_root = tmp_path / "library"
 
     with patch(
-        "photo_importer.importer.metadata.get_capture_dates",
+        "photo_importer.importer.metadata.iter_capture_date_batches",
         side_effect=lambda paths: _mock_dates(paths, datetime(2024, 3, 15, 10, 0, 0)),
     ):
         summary = run_import(str(source), str(local_root), {".jpg"}, dry_run=True)
@@ -82,7 +82,7 @@ def test_same_name_different_content_gets_suffixed(tmp_path):
     (dest_dir / "IMG_0001.jpg").write_bytes(b"different-content-different-size")
 
     with patch(
-        "photo_importer.importer.metadata.get_capture_dates",
+        "photo_importer.importer.metadata.iter_capture_date_batches",
         side_effect=lambda paths: _mock_dates(paths, datetime(2024, 3, 15, 10, 0, 0)),
     ):
         summary = run_import(str(source), str(local_root), {".jpg"})
@@ -109,7 +109,7 @@ def test_copy_uses_temp_name_then_atomic_rename(tmp_path):
         return real_copyfile(src, dst)
 
     with patch(
-        "photo_importer.importer.metadata.get_capture_dates",
+        "photo_importer.importer.metadata.iter_capture_date_batches",
         side_effect=lambda paths: _mock_dates(paths, datetime(2024, 3, 15, 10, 0, 0)),
     ), patch("photo_importer.importer.shutil.copyfile", side_effect=spying_copyfile):
         run_import(str(source), str(local_root), {".jpg"})
@@ -131,7 +131,7 @@ def test_copy_survives_utime_permission_error(tmp_path):
     dest = local_root / "2024" / "03" / "15" / "IMG_0001.jpg"
 
     with patch(
-        "photo_importer.importer.metadata.get_capture_dates",
+        "photo_importer.importer.metadata.iter_capture_date_batches",
         side_effect=lambda paths: _mock_dates(paths, datetime(2024, 3, 15, 10, 0, 0)),
     ), patch("photo_importer.importer.os.utime", side_effect=PermissionError("utime")):
         summary = run_import(str(source), str(local_root), {".jpg"})
@@ -160,7 +160,7 @@ def test_copy_survives_source_file_with_immutable_flag(tmp_path):
 
     try:
         with patch(
-            "photo_importer.importer.metadata.get_capture_dates",
+            "photo_importer.importer.metadata.iter_capture_date_batches",
             side_effect=lambda paths: _mock_dates(paths, datetime(2024, 3, 15, 10, 0, 0)),
         ):
             summary = run_import(str(source), str(local_root), {".jpg"})
@@ -211,7 +211,7 @@ def test_run_import_cleans_up_stale_temp_files_automatically(tmp_path):
     (stale_dir / ".SomeOldFile.jpg.tmp").write_bytes(b"partial")
 
     with patch(
-        "photo_importer.importer.metadata.get_capture_dates",
+        "photo_importer.importer.metadata.iter_capture_date_batches",
         side_effect=lambda paths: _mock_dates(paths, datetime(2024, 3, 15, 10, 0, 0)),
     ):
         run_import(str(source), str(local_root), {".jpg"})
@@ -231,7 +231,7 @@ def test_run_import_dry_run_does_not_clean_up_stale_temp_files(tmp_path):
     stale.write_bytes(b"partial")
 
     with patch(
-        "photo_importer.importer.metadata.get_capture_dates",
+        "photo_importer.importer.metadata.iter_capture_date_batches",
         side_effect=lambda paths: _mock_dates(paths, datetime(2024, 3, 15, 10, 0, 0)),
     ):
         run_import(str(source), str(local_root), {".jpg"}, dry_run=True)
@@ -253,3 +253,34 @@ def test_resolve_dest_path_matches_run_import_collision_behavior(tmp_path):
     path = resolve_dest_path(str(tmp_path), datetime(2024, 3, 15, 10, 0, 0), "IMG_0001.jpg", size=3)
 
     assert path == dest_dir / "IMG_0001 (1).jpg"
+
+
+def _mock_dates_in_chunks(paths, when, chunk_size):
+    for i in range(0, len(paths), chunk_size):
+        yield {p: when for p in paths[i:i + chunk_size]}
+
+
+def test_import_spans_multiple_metadata_batches(tmp_path):
+    source = tmp_path / "source"
+    source.mkdir()
+    for i in range(5):
+        (source / f"IMG_{i:04d}.jpg").write_bytes(f"content-{i}".encode())
+
+    local_root = tmp_path / "library"
+    when = datetime(2024, 3, 15, 10, 0, 0)
+
+    with patch(
+        "photo_importer.importer.metadata.iter_capture_date_batches",
+        side_effect=lambda paths: _mock_dates_in_chunks(paths, when, chunk_size=2),
+    ):
+        summary = run_import(str(source), str(local_root), {".jpg"})
+
+    assert summary.scanned == 5
+    assert summary.imported == 5
+    assert summary.skipped_duplicate == 0
+    for i in range(5):
+        dest = local_root / "2024" / "03" / "15" / f"IMG_{i:04d}.jpg"
+        assert dest.read_bytes() == f"content-{i}".encode()
+    assert sorted(summary.imported_files) == sorted(
+        str(local_root / "2024" / "03" / "15" / f"IMG_{i:04d}.jpg") for i in range(5)
+    )
