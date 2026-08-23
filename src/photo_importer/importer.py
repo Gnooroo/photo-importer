@@ -11,6 +11,7 @@ from pathlib import Path
 
 from . import metadata, scanner
 from .index import ImportIndex
+from .progress import Progress
 
 
 @dataclass
@@ -118,6 +119,7 @@ def run_import(
     dates = metadata.get_capture_dates(files)
 
     total = len(files)
+    progress = Progress(total)
     for i, src_path in enumerate(files, start=1):
         size = src_path.stat().st_size
         filename = src_path.name
@@ -157,12 +159,12 @@ def run_import(
                 summary.imported_files.append(str(dest_path))
 
         verb = "Would import" if dry_run else "Importing"
-        print(
-            f"\r{verb}: {i}/{total} ({i * 100 // total}%) "
+        progress.update(
+            f"{verb}: {i}/{total} ({i * 100 // total}%) "
             f"imported={summary.imported} skipped={summary.skipped_duplicate}",
-            end="", flush=True,
+            i,
         )
-    print()
+    progress.done()
 
     if not dry_run:
         index.save()

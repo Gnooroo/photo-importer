@@ -117,14 +117,22 @@ mount, if available) will generally be much faster.
 
 ## Progress reporting
 
-Both metadata reading and the copy step print a live-updating single line
-(e.g. `Importing: 342/1528 (22%) imported=340 skipped=2`) so a large card
-doesn't sit silent for minutes. `sync` streams rsync's own per-file
-`-v --progress` output. In one-shot mode, the background sync (running
-concurrently with the import loop) is quiet -- just a "starting" line and any
-failure warning -- so its per-file output doesn't fight with the import
-progress line on the same terminal; the catch-up sync that runs after import
-finishes (when nothing else is printing) is verbose as usual.
+Both metadata reading and the copy step print live progress (e.g.
+`Importing: 342/1528 (22%) imported=340 skipped=2`) so a large card doesn't
+sit silent for minutes. On a real terminal this is a single line that
+overwrites itself in place; when stdout isn't an interactive terminal (piped,
+redirected, or read by another front end/GUI wrapping the command) it instead
+prints real, newline-terminated lines throttled to roughly every 5% of
+progress -- `\r`-based overwriting only means anything to a real terminal, so
+anything else would otherwise see nothing until the very end, when it'd all
+arrive at once and look like the run jumped straight to 100% having done
+nothing (`src/photo_importer/progress.py`). `sync` streams rsync's own
+per-file `-v --progress` output (rsync makes its own tty-vs-not decisions).
+In one-shot mode, the background sync (running concurrently with the import
+loop) is quiet -- just a "starting" line and any failure warning -- so its
+per-file output doesn't fight with the import progress line on the same
+terminal; the catch-up sync that runs after import finishes (when nothing
+else is printing) is verbose as usual.
 
 ## One-shot mode
 
