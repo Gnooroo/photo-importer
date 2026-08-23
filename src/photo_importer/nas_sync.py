@@ -25,6 +25,19 @@ class NasSyncError(Exception):
     pass
 
 
+def require_mounted(mount_point: str | None) -> None:
+    if not mount_point:
+        raise NasSyncError(
+            "nas.mount_point is not set in your config.yaml."
+        )
+    if not os.path.ismount(mount_point):
+        raise NasSyncError(
+            f"{mount_point} is not currently mounted. Mount the NAS share first "
+            "(Finder -> Go -> Connect to Server on macOS, a cifs/GVFS mount on "
+            "Linux, or a mapped drive/UNC path on Windows), then re-run sync."
+        )
+
+
 def count_synced(local_root: str, mount_point: str, remote_subpath: str = "") -> tuple[int, int]:
     """Return (synced, total): the total number of files currently in
     local_root, and how many of them are also present at the NAS destination
@@ -78,16 +91,7 @@ def sync(
     verbose: bool = True,
     label: str = "Sync",
 ) -> subprocess.CompletedProcess:
-    if not mount_point:
-        raise NasSyncError(
-            "nas.mount_point is not set in your config.yaml."
-        )
-    if not os.path.ismount(mount_point):
-        raise NasSyncError(
-            f"{mount_point} is not currently mounted. Mount the NAS share first "
-            "(Finder -> Go -> Connect to Server on macOS, a cifs/GVFS mount on "
-            "Linux, or a mapped drive/UNC path on Windows), then re-run sync."
-        )
+    require_mounted(mount_point)
 
     dest = os.path.join(mount_point, remote_subpath) if remote_subpath else mount_point
     os.makedirs(dest, exist_ok=True)

@@ -37,6 +37,8 @@ class Config:
     nas_mount_point: str | None = None
     nas_remote_subpath: str = ""
     nas_smb_url: str | None = None
+    migrate_source_path: str | None = None
+    migrate_batch_size: int = 200
 
     @property
     def extension_set(self) -> set[str]:
@@ -64,6 +66,7 @@ def load_config(explicit_path: str | None = None) -> Config:
             data = yaml.safe_load(f) or {}
 
     nas = data.get("nas") or {}
+    migrate = data.get("migrate") or {}
     return Config(
         source=data.get("source", "auto"),
         local_root=data.get("local_root"),
@@ -71,6 +74,8 @@ def load_config(explicit_path: str | None = None) -> Config:
         nas_mount_point=nas.get("mount_point"),
         nas_remote_subpath=nas.get("remote_subpath", ""),
         nas_smb_url=nas.get("smb_url"),
+        migrate_source_path=migrate.get("source_path"),
+        migrate_batch_size=migrate.get("batch_size", 200),
     )
 
 

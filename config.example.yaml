@@ -42,3 +42,10 @@ nas:
   # Keychain-saved login if you have one, or pops Finder's own login dialog.
   # Optional: leave unset to skip auto-mount and just warn if not mounted.
   smb_url: smb://your-nas-hostname/NAS_SHARE
+
+# Used only by `photo-importer migrate copy` / `migrate purge` (consolidating
+# an existing messy catalog into the nas.mount_point/nas.remote_subpath
+# archive -- see README). Both are optional; --source/--batch-size override.
+migrate:
+  source_path: /Volumes/NAS_SHARE/SomeOldFolderToConsolidate
+  batch_size: 200

@@ -185,6 +185,43 @@ doesn't, you'll see a warning and a prompt to press Enter before continuing,
 so a random USB drive doesn't accidentally get scanned/imported/synced into
 the photo archive.
 
+## `migrate`: consolidating an existing messy catalog
+
+If you've got old photos/videos scattered across various folders/structures
+(e.g. already sitting on the NAS from before this tool existed) that you want
+folded into the same `YYYY/MM/DD` archive as everything else, `migrate` does
+that -- as two separate, explicit steps you run whenever you choose to,
+never automatically:
+
+```
+photo-importer migrate copy  --source /Volumes/NAS_SHARE/OldPhotos
+photo-importer migrate purge --source /Volumes/NAS_SHARE/OldPhotos
+```
+
+- **`copy`** is always safe and purely additive: it copies files into the
+  archive if they're not already there (same temp-name-then-atomic-rename
+  safety as `import`), and never touches the source. Safe to run against
+  *any* folder -- including one still actively receiving new files (e.g.
+  from a phone backup app) -- since nothing is ever deleted.
+- **`purge`** is pure cleanup and never copies anything: it deletes a source
+  file *only if* a matching copy (same resolved archive path, same size) is
+  already confirmed present in the archive. Run this only against folders
+  you know are no longer actively receiving new files -- the tool doesn't
+  try to detect that for you, it's your call which folders are safe. (If a
+  folder is still an active destination for some other backup/sync tool,
+  deleting from it could cause that tool to treat the file as missing and
+  re-send it -- `copy` alone already gets it into the archive without that
+  risk; only run `purge` once you're sure a folder is done receiving new
+  uploads.)
+
+Both scan recursively (any nested folder structure), process in batches
+(`--batch-size`, default 200 or `migrate.batch_size` in config) so a huge
+catalog doesn't have to be done in one sitting, and are naturally resumable
+-- just re-run the same command to continue; each run figures out what's
+still pending fresh rather than tracking a separate cursor/checkpoint file.
+Both refuse to run (before touching anything) if `--source` overlaps with
+the archive destination itself, and support `--dry-run`.
+
 ## Platform support
 
 Built and tested primarily on macOS -- that's the only platform actually

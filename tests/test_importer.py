@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 import pytest
 
-from photo_importer.importer import _cleanup_stale_temp_files, run_import
+from photo_importer.importer import _cleanup_stale_temp_files, resolve_dest_path, run_import
 
 
 def _mock_dates(paths, when):
@@ -237,3 +237,19 @@ def test_run_import_dry_run_does_not_clean_up_stale_temp_files(tmp_path):
         run_import(str(source), str(local_root), {".jpg"}, dry_run=True)
 
     assert stale.exists()
+
+
+def test_resolve_dest_path_builds_date_folder(tmp_path):
+    path = resolve_dest_path(str(tmp_path), datetime(2024, 3, 15, 10, 0, 0), "IMG_0001.jpg", size=100)
+
+    assert path == tmp_path / "2024" / "03" / "15" / "IMG_0001.jpg"
+
+
+def test_resolve_dest_path_matches_run_import_collision_behavior(tmp_path):
+    dest_dir = tmp_path / "2024" / "03" / "15"
+    dest_dir.mkdir(parents=True)
+    (dest_dir / "IMG_0001.jpg").write_bytes(b"different-content-different-size")
+
+    path = resolve_dest_path(str(tmp_path), datetime(2024, 3, 15, 10, 0, 0), "IMG_0001.jpg", size=3)
+
+    assert path == dest_dir / "IMG_0001 (1).jpg"
