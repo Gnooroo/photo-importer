@@ -66,6 +66,7 @@ import errno
 import json
 import os
 from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -79,6 +80,11 @@ from .timing import timed
 
 BACKUP_SYNC_STATE_FILENAME = "backup_sync_state.json"
 BACKUP_METADATA_CACHE_FILENAME = "backup_metadata_cache.json"
+
+# Not CPU-bound like metadata.DEFAULT_WORKERS (exiftool subprocesses): this
+# pool just overlaps stat() network round trips, so a higher count than
+# cpu_count() is fine and helps more.
+_STAT_WORKERS = 16
 
 
 class _MetadataDateCache:
@@ -212,13 +218,22 @@ def _iter_archive_status_batches(
     else:
         need_resolve = []
         cached_files = []
-        for f in all_files:
-            st = f.stat()
-            rel = f.relative_to(source_dir).as_posix()
-            if cache.is_verified(rel, st.st_size, st.st_mtime):
-                cached_files.append(f)
-            else:
-                need_resolve.append(f)
+        # backup-sync's whole point is a steady-state re-run where nearly
+        # every file is already a cache hit -- but each hit still needs one
+        # stat() to get the current (size, mtime) to check against the
+        # cache, and against a network source (SMB, the actual backup-sync
+        # case) that's a real per-call round trip. Doing those concurrently,
+        # same as metadata.iter_capture_date_batches does for exiftool
+        # calls, overlaps the round trips instead of paying for them one at
+        # a time -- the only work left once nothing needs copying.
+        with ThreadPoolExecutor(max_workers=_STAT_WORKERS) as pool:
+            stats = pool.map(lambda f: f.stat(), all_files)
+            for f, st in zip(all_files, stats):
+                rel = f.relative_to(source_dir).as_posix()
+                if cache.is_verified(rel, st.st_size, st.st_mtime):
+                    cached_files.append(f)
+                else:
+                    need_resolve.append(f)
 
     if metadata_cache is None:
         date_known: list[tuple[Path, datetime]] = []
@@ -226,20 +241,34 @@ def _iter_archive_status_batches(
     else:
         date_known = []
         still_need_dates = []
-        for f in need_resolve:
-            st = f.stat()
-            rel = f.relative_to(source_dir).as_posix()
-            cached_date = metadata_cache.get(rel, st.st_size, st.st_mtime)
-            if cached_date is not None:
-                date_known.append((f, cached_date))
-            else:
-                still_need_dates.append(f)
+        # Same round-trip-overlap reasoning as the cache stat loop above --
+        # need_resolve is everything the state cache didn't already dispose
+        # of, which on a fresh dry-run (metadata_cache is written during
+        # dry-run, state_cache never is -- see run_copy's docstring) can be
+        # the whole source, one SMB round trip per file otherwise.
+        with ThreadPoolExecutor(max_workers=_STAT_WORKERS) as pool:
+            stats = pool.map(lambda f: f.stat(), need_resolve)
+            for f, st in zip(need_resolve, stats):
+                rel = f.relative_to(source_dir).as_posix()
+                cached_date = metadata_cache.get(rel, st.st_size, st.st_mtime)
+                if cached_date is not None:
+                    date_known.append((f, cached_date))
+                else:
+                    still_need_dates.append(f)
 
-    def _resolve_item(src_path: Path, capture_date: datetime) -> tuple[Path, Path, bool]:
-        size = src_path.stat().st_size
-        dest_path = resolve_dest_path(dest_root, capture_date, src_path.name, size)
-        is_archived = dest_path.exists() and dest_path.stat().st_size == size
-        return (src_path, dest_path, is_archived)
+    def _resolve_item(src_path: Path, capture_date: datetime) -> tuple[Path, Path, bool, os.stat_result]:
+        st = src_path.stat()
+        dest_path = resolve_dest_path(dest_root, capture_date, src_path.name, st.st_size)
+        is_archived = dest_path.exists() and dest_path.stat().st_size == st.st_size
+        return (src_path, dest_path, is_archived, st)
+
+    def _resolve_chunk(chunk: list[tuple[Path, datetime]]) -> list[tuple[Path, Path, bool, os.stat_result]]:
+        # Each _resolve_item does up to 3 network round trips (src stat, dest
+        # exists, dest stat -- dest_root is the NAS archive for backup-sync),
+        # done one item at a time before this; overlapping them across a
+        # whole batch is the same fix as the cache/metadata stat loops above.
+        with ThreadPoolExecutor(max_workers=_STAT_WORKERS) as pool:
+            return list(pool.map(lambda item: _resolve_item(*item), chunk))
 
     def _batches() -> Iterator[list[tuple[Path, Path | None, bool]]]:
         for i in range(0, len(cached_files), metadata.BATCH_SIZE):
@@ -247,13 +276,18 @@ def _iter_archive_status_batches(
             yield [(f, None, True) for f in chunk]
         for i in range(0, len(date_known), metadata.BATCH_SIZE):
             chunk = date_known[i:i + metadata.BATCH_SIZE]
-            yield [_resolve_item(f, d) for f, d in chunk]
+            resolved = _resolve_chunk(chunk)
+            yield [(src, dest, archived) for src, dest, archived, _st in resolved]
         for batch_dates in metadata.iter_capture_date_batches(still_need_dates):
+            pairs = list(batch_dates.items())
+            resolved = _resolve_chunk(pairs)
             items = []
-            for src_path, capture_date in batch_dates.items():
-                items.append(_resolve_item(src_path, capture_date))
+            for (src_path, capture_date), (_src, dest_path, is_archived, st) in zip(pairs, resolved):
+                items.append((src_path, dest_path, is_archived))
                 if metadata_cache is not None:
-                    st = src_path.stat()
+                    # st came from _resolve_item's own stat() -- reusing it
+                    # here instead of stat-ing src_path again avoids a second
+                    # round trip per file for a value already in hand.
                     rel = src_path.relative_to(source_dir).as_posix()
                     metadata_cache.set(rel, st.st_size, st.st_mtime, capture_date)
             yield items
@@ -321,7 +355,13 @@ def run_copy(
                 i += 1
                 if is_archived:
                     summary.already_present += 1
-                    if state_cache is not None and not dry_run:
+                    # dest_path is None exactly when this came from a
+                    # state_cache hit (see _iter_archive_status_batches) --
+                    # cache.is_verified() already confirmed this file's
+                    # current (size, mtime) moments ago, so re-stat-ing and
+                    # re-writing the identical entry here would just be a
+                    # second SMB round trip per file for no new information.
+                    if state_cache is not None and not dry_run and dest_path is not None:
                         _mark_source_verified(state_cache, source_dir, src_path)
                 else:
                     try:

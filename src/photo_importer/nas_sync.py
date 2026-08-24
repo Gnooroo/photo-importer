@@ -34,6 +34,11 @@ class NasSyncError(Exception):
 
 SYNC_STATE_FILENAME = "sync_state.json"
 
+# Not CPU-bound: this pool just overlaps stat()/exists() network round trips
+# against the NAS side, so a higher count than cpu_count() is fine and helps
+# more. Same reasoning and value as migrate.py's _STAT_WORKERS.
+_STAT_WORKERS = 16
+
 
 def _dest_path(mount_point: str, remote_subpath: str) -> str:
     return os.path.join(mount_point, remote_subpath) if remote_subpath else mount_point
@@ -104,7 +109,15 @@ def _diff_local_vs_nas(
     """
     dest_root = Path(mount_point) / remote_subpath if remote_subpath else Path(mount_point)
     total = 0
-    pending: list[tuple[str, int]] = []
+    # local_root is local disk (fast) -- walk and stat it sequentially, but
+    # collect anything not already cache-verified for a batched NAS-side
+    # check below rather than stat-ing the NAS one file at a time: a full
+    # count_synced() pass never uses the cache (see its docstring, and
+    # sync_with_heartbeat's polling loop, which calls this every `interval`
+    # seconds during an active sync), so this NAS-side check is exactly the
+    # steady-state-with-nothing-cached case the same fix already helped in
+    # migrate.py.
+    to_check: list[tuple[str, int, float]] = []
     for path in Path(local_root).rglob("*"):
         if not path.is_file() or _is_sync_excluded(path.name):
             continue
@@ -114,12 +127,23 @@ def _diff_local_vs_nas(
         rel_posix = path.relative_to(local_root).as_posix()
         if cache is not None and cache.is_verified(rel_posix, size, st.st_mtime):
             continue
-        dest_path = dest_root / rel_posix
-        if dest_path.exists() and dest_path.stat().st_size == size:
-            if cache is not None:
-                cache.mark_verified(rel_posix, size, st.st_mtime)
-        else:
-            pending.append((rel_posix, size))
+        to_check.append((rel_posix, size, st.st_mtime))
+
+    pending: list[tuple[str, int]] = []
+    if to_check:
+        def _present(item: tuple[str, int, float]) -> bool:
+            rel_posix, size, _mtime = item
+            dest_path = dest_root / rel_posix
+            return dest_path.exists() and dest_path.stat().st_size == size
+
+        with ThreadPoolExecutor(max_workers=_STAT_WORKERS) as pool:
+            results = pool.map(_present, to_check)
+            for (rel_posix, size, mtime), present in zip(to_check, results):
+                if present:
+                    if cache is not None:
+                        cache.mark_verified(rel_posix, size, mtime)
+                else:
+                    pending.append((rel_posix, size))
     return total, pending
 
 
