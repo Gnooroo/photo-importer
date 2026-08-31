@@ -66,9 +66,8 @@ photo-importer import --source /Volumes/SDCARD
 photo-importer import --dry-run
 ```
 
-**`sync`** -- push the local library to the NAS on its own (the SMB share
-must already be mounted -- via Finder's "Connect to Server", or
-`mount_smbfs`; unlike one-shot mode, this does not try to auto-mount):
+**`sync`** -- push the local library to the NAS on its own (tries to
+auto-mount the SMB share first, same as one-shot mode -- see below):
 
 ```
 photo-importer sync
@@ -206,14 +205,17 @@ sync pass can never observe (and thus permanently skip, via
 `--ignore-existing`) a partially-written file, no matter how often it runs
 mid-import.
 
-If `nas.mount_point` isn't already mounted, one-shot mode tries to mount it
-automatically via `open <nas.smb_url>` (uses a Keychain-saved login if you
-have one, or pops Finder's own login dialog -- this tool never handles
-credentials itself), waiting up to 10s. If it still isn't mounted, you'll see
-a warning and a prompt to press Enter before the run continues as an
-import-only pass (NAS sync skipped for that run). Set `nas.smb_url` in
-`config.yaml` to enable the auto-mount attempt; leave it unset to skip
-straight to the warning/prompt when unmounted.
+If `nas.mount_point` isn't already mounted, one-shot mode (and `sync`,
+`migrate`, and `backup-sync` when running against the default NAS
+destination, i.e. without `--dest`) tries to mount it automatically via
+`open <nas.smb_url>` (uses a Keychain-saved login if you have one, or pops
+Finder's own login dialog -- this tool never handles credentials itself),
+waiting up to 10s. Set `nas.smb_url` in `config.yaml` to enable the
+auto-mount attempt; leave it unset to skip straight to whatever happens when
+still unmounted. What happens next differs by command: one-shot mode shows a
+warning and a prompt to press Enter before continuing as an import-only pass
+(NAS sync skipped for that run); `sync`, `migrate`, and `backup-sync` instead
+fail with an error telling you to mount the share yourself.
 
 Because one-shot mode acts automatically (including pushing to the NAS), it
 also checks that the source actually looks like a camera card -- i.e. it has
@@ -263,9 +265,10 @@ metadata for the whole thing every time.
 
 Set `backup.source_paths` in `config.yaml` to avoid passing `--source` every
 time; by default the destination is the same NAS archive `sync` and
-`migrate` use (`nas.mount_point` + `nas.remote_subpath`), and the NAS must
-already be mounted -- pass `--dest` to target a different folder instead
-(skips the NAS-mount check, same as `migrate --dest`).
+`migrate` use (`nas.mount_point` + `nas.remote_subpath`), auto-mounted the
+same way (see above) if not already reachable -- pass `--dest` to target a
+different folder instead (skips the NAS-mount check, same as `migrate
+--dest`).
 
 ## `migrate`: consolidating an existing messy catalog
 
@@ -318,8 +321,9 @@ three refuse to run (before touching anything) if `--source`
 overlaps with the archive destination itself, and support `--dry-run`.
 
 By default the destination is the NAS mount + `nas.remote_subpath` from
-config, and the NAS must be mounted. Pass `--dest` to consolidate into any
-other folder instead -- this skips the NAS-mount check entirely, so
+config, auto-mounted (see the one-shot section above) if not already
+reachable. Pass `--dest` to consolidate into any other folder instead --
+this skips the NAS-mount check entirely, so
 `migrate` can run standalone (no `config.yaml`, no NAS) against any two
 folders on disk:
 
@@ -343,12 +347,13 @@ below, on a best-effort basis:
   drive letters and picks ones the OS reports as removable media. On any
   platform, `--source /explicit/path` (or a drive letter/UNC path on Windows)
   always works regardless of auto-detection.
-- **NAS auto-mount** (one-shot mode's `open smb://...` step) is macOS-only --
-  Linux and Windows have no equivalent single-command auto-mount, so one-shot
-  mode just checks whether `nas.mount_point` is already reachable and
-  warns/prompts if not, same as everywhere else. Mount the share yourself
-  first (a cifs/GVFS mount on Linux, a mapped drive letter or UNC path on
-  Windows).
+- **NAS auto-mount** (the `open smb://...` step used by one-shot mode,
+  `sync`, `migrate`, and `backup-sync`) is macOS-only -- Linux and Windows
+  have no equivalent single-command auto-mount, so on those platforms every
+  command just checks whether `nas.mount_point` is already reachable and
+  warns/prompts (one-shot mode) or errors (`sync`/`migrate`/`backup-sync`) if
+  not. Mount the share yourself first (a cifs/GVFS mount on Linux, a mapped
+  drive letter or UNC path on Windows).
 - **rsync progress flags** are chosen per-OS (`--progress` for macOS's bundled
   openrsync, `--info=progress2` for the modern GNU rsync Linux typically
   ships -- assumed for Windows too, since whatever rsync port you install

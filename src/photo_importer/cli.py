@@ -133,10 +133,21 @@ def _cmd_import(args) -> int:
     return 0
 
 
+def _ensure_nas_mounted(config) -> None:
+    """Best-effort auto-mount (same `open <nas.smb_url>` trick one-shot mode
+    already uses, see nas_sync.ensure_mounted) before requiring the NAS mount
+    point to actually be reachable -- so `sync`, `migrate`, and `backup-sync`
+    don't force mounting the share by hand first either.
+    """
+    if config.nas_mount_point:
+        nas_sync.ensure_mounted(config.nas_mount_point, config.nas_smb_url)
+    nas_sync.require_mounted(config.nas_mount_point)
+
+
 def _cmd_sync(args) -> int:
     config = apply_cli_overrides(load_config(args.config), args)
     local_root = require_local_root(config)
-    nas_sync.require_mounted(config.nas_mount_point)
+    _ensure_nas_mounted(config)
     workers = args.workers or config.nas_sync_workers
 
     ok = nas_sync.sync_with_heartbeat(
@@ -199,7 +210,7 @@ def _resolve_migrate_args(args) -> tuple:
     if args.dest:
         dest_root = os.path.expanduser(args.dest)
     else:
-        nas_sync.require_mounted(config.nas_mount_point)
+        _ensure_nas_mounted(config)
         dest_root = (
             os.path.join(config.nas_mount_point, config.nas_remote_subpath)
             if config.nas_remote_subpath
@@ -219,7 +230,7 @@ def _resolve_backup_args(args) -> tuple:
     if args.dest:
         dest_root = os.path.expanduser(args.dest)
     else:
-        nas_sync.require_mounted(config.nas_mount_point)
+        _ensure_nas_mounted(config)
         dest_root = (
             os.path.join(config.nas_mount_point, config.nas_remote_subpath)
             if config.nas_remote_subpath
