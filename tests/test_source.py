@@ -114,3 +114,53 @@ def test_detect_source_volume_no_candidates_raises():
             assert False, "expected SourceError"
         except source.SourceError as e:
             assert "No candidate source volumes" in str(e)
+
+
+def test_detect_source_volume_prefers_the_one_with_dcim(tmp_path):
+    card = tmp_path / "SDCARD"
+    (card / "DCIM").mkdir(parents=True)
+    other = tmp_path / "BACKUP_DRIVE"
+    other.mkdir()
+
+    with patch.object(source, "_candidate_volumes", return_value=[str(other), str(card)]):
+        assert source.detect_source_volume() == str(card)
+
+
+def test_detect_source_volume_breaks_dcim_tie_by_mtime(tmp_path):
+    older = tmp_path / "OLD_CARD"
+    (older / "DCIM").mkdir(parents=True)
+    newer = tmp_path / "NEW_CARD"
+    (newer / "DCIM").mkdir(parents=True)
+
+    with patch.object(source, "_candidate_volumes", return_value=[str(older), str(newer)]), \
+         patch.object(source, "_creation_time", side_effect=lambda p: 2.0 if p == str(newer) else 1.0):
+        assert source.detect_source_volume() == str(newer)
+
+
+def test_detect_source_volume_falls_back_to_mtime_when_none_have_dcim_and_confirmed(tmp_path):
+    a = tmp_path / "A"
+    a.mkdir()
+    b = tmp_path / "B"
+    b.mkdir()
+
+    with patch.object(source, "_candidate_volumes", return_value=[str(a), str(b)]), \
+         patch.object(source, "_creation_time", side_effect=lambda p: 2.0 if p == str(b) else 1.0), \
+         patch("builtins.input", return_value="y") as mock_input:
+        assert source.detect_source_volume() == str(b)
+    mock_input.assert_called_once()
+
+
+def test_detect_source_volume_no_dcim_defaults_to_no_and_aborts(tmp_path):
+    a = tmp_path / "A"
+    a.mkdir()
+    b = tmp_path / "B"
+    b.mkdir()
+
+    with patch.object(source, "_candidate_volumes", return_value=[str(a), str(b)]), \
+         patch("builtins.input", return_value="") as mock_input:
+        try:
+            source.detect_source_volume()
+            assert False, "expected SourceError"
+        except source.SourceError as e:
+            assert "no candidate volume looks like a camera card" in str(e)
+    mock_input.assert_called_once()

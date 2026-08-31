@@ -7,6 +7,8 @@ import os
 import platform
 import string
 
+from .output import report
+
 MACOS_VOLUMES_DIR = "/Volumes"
 MACOS_EXCLUDED_VOLUMES = {"Macintosh HD"}
 
@@ -106,7 +108,26 @@ def detect_source_volume(nas_mount_point: str | None = None) -> str:
     if len(candidates) == 1:
         return candidates[0]
 
-    # Multiple candidates: pick the most recently mounted, but only if there's a
+    # Multiple candidates: prefer ones that actually look like a camera card
+    # (top-level DCIM folder) over e.g. an unrelated USB drive that merely
+    # happens to be newer.
+    camera_cards = [c for c in candidates if looks_like_camera_card(c)]
+    if len(camera_cards) == 1:
+        return camera_cards[0]
+    if camera_cards:
+        candidates = camera_cards
+    else:
+        report(
+            f"None of the candidate volumes ({', '.join(candidates)}) have a DCIM "
+            "folder, so the guess below isn't backed by the camera-card heuristic."
+        )
+        answer = input("Continue with the most-recently-mounted guess anyway? [y/N] ").strip().lower()
+        if answer not in ("y", "yes"):
+            raise SourceError(
+                "Aborted: no candidate volume looks like a camera card. Pass --source explicitly."
+            )
+
+    # Still ambiguous: pick the most recently mounted, but only if there's a
     # clear winner (avoids silently picking the wrong card among several).
     by_mtime = sorted(candidates, key=_creation_time, reverse=True)
     newest, second = by_mtime[0], by_mtime[1]
